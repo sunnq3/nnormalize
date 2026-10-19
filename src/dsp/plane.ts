@@ -46,6 +46,30 @@ export function extractTile(p: Plane, x0: number, y0: number, w: number, h: numb
   return dst;
 }
 
+/** Pad by mirroring (no repeated edge pixel) on all four sides. */
+export function reflectPad(p: Plane, pad: number): Plane {
+  const w = p.w + 2 * pad;
+  const h = p.h + 2 * pad;
+  const out = new Float32Array(w * h);
+  const refl = (i: number, n: number): number => {
+    const period = 2 * n - 2;
+    if (n === 1) return 0;
+    i = ((i % period) + period) % period;
+    return i < n ? i : period - i;
+  };
+  for (let y = 0; y < h; y++) {
+    const sy = refl(y - pad, p.h) * p.w;
+    for (let x = 0; x < w; x++) out[y * w + x] = p.data[sy + refl(x - pad, p.w)];
+  }
+  return { w, h, data: out };
+}
+
+export function cropPlane(p: Plane, x0: number, y0: number, w: number, h: number): Plane {
+  const out = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) out.set(p.data.subarray((y0 + y) * p.w + x0, (y0 + y) * p.w + x0 + w), y * w);
+  return { w, h, data: out };
+}
+
 /** Nearest-neighbour-free box downsample by an integer factor (area average). */
 export function downsamplePlane(p: Plane, factor: number): Plane {
   if (factor <= 1) return p;
