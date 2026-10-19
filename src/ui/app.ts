@@ -6,7 +6,8 @@
 import type { Analysis, AnalysisOptions, CleanupLevel, Finding, PeriodicMethod } from '../analysis/types';
 import { EngineClient } from '../engine/client';
 import { defaultBudget, type Budget, type LayerSetting, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
-import { defaultExportOptions, type JpegExportOptions } from '../io/encode';
+import type { JpegExportOptions } from '../io/encode';
+import { PROFILES, resolveProfile, type ProfileId } from '../engine/profiles';
 import { stageSorted } from '../engine/engine';
 import { SpectrumPanel } from './spectrum';
 import { Viewer } from './viewer';
@@ -19,6 +20,7 @@ interface RecipeFile {
   version: number;
   name?: string;
   master?: number;
+  profile?: ProfileId;
   analysisOptions?: Partial<AnalysisOptions>;
   exportOptions?: Partial<JpegExportOptions>;
   budget?: Partial<Budget>;
@@ -48,7 +50,9 @@ export class App {
   private master = 1;
   private diffGain = 8;
   private selected: string | null = null;
-  private exportOptions: JpegExportOptions = { ...defaultExportOptions };
+  private exportOptions: JpegExportOptions = { ...PROFILES.custom.encode };
+  private profileId: ProfileId = 'reddit';
+  private checked = false; // a posted view exists
   private budget: Budget = { ...defaultBudget };
   private analysisOptions: Partial<AnalysisOptions> = { level: 'standard' };
   private report: RoundTripReport | null = null;
@@ -107,7 +111,7 @@ export class App {
     this.status = el('div', { class: 'status' }, 'Open a photo to begin.');
     this.progressBar = el('div');
     this.exportBtn = el('button', { class: 'primary', disabled: '' }, 'Save JPEG') as HTMLButtonElement;
-    this.exportBtn.addEventListener('click', () => void this.doExport());
+    this.exportBtn.addEventListener('click', () => void this.doExport(true));
     this.levelSelect = el('select', { title: 'How far the clean-up goes' }) as HTMLSelectElement;
     for (const k of ['gentle', 'standard', 'strong', 'maximum'] as CleanupLevel[]) {
       const o = el('option', { value: k }, LEVEL_WORDS[k].label) as HTMLOptionElement;
@@ -132,18 +136,21 @@ export class App {
     this.hud = el('div');
     this.viewer = new Viewer({
       requestCrop: (x0, y0, w, h) => this.client.render({ region: { kind: 'crop', x0, y0, w, h }, ...this.renderArgs() }),
+      requestCropOriginal: (x0, y0, w, h) =>
+        this.client.render({ region: { kind: 'crop', x0, y0, w, h }, mode: this.viewer.mode === 'posted' ? 'posted-source' : 'original', layers: [], master: 1, diffGain: 1, maskId: null }),
       requestPreview: () => this.client.render({ region: { kind: 'preview' }, ...this.renderArgs() }),
       maskChanged: () => void this.pushMask().then(() => this.queueRender()),
       onHud: (t) => (this.hud.textContent = t),
     });
     this.hud = this.viewer.el.querySelector('.hud') as HTMLElement;
     const modeGroup = el('div', { class: 'group' });
-    for (const [mode, label] of [
-      ['original', 'Before'],
-      ['result', 'After'],
-      ['difference', 'What changed'],
-    ] as [ViewMode, string][]) {
-      const b = el('button', { onclick: () => this.setMode(mode) }, label) as HTMLButtonElement;
+    for (const [mode, label, title] of [
+      ['original', 'Before', 'The photo as opened'],
+      ['result', 'After', 'With the ticked fixes'],
+      ['difference', 'What changed', 'The difference, amplified'],
+      ['posted', 'As posted', 'What a downloader gets after the destination re-saves it; Split shows the untouched photo given the same treatment'],
+    ] as [ViewMode, string, string][]) {
+      const b = el('button', { onclick: () => this.setMode(mode), title }, label) as HTMLButtonElement;
       this.modeButtons.set(mode, b);
       modeGroup.appendChild(b);
     }
@@ -240,7 +247,8 @@ export class App {
         el('p', {}, 'Open a photo. The tool looks for things that repeat (stripes, moiré, dot screens), the block grid left by earlier JPEG saves, uneven grain, and dead pixels. Each one becomes a line under “Problems found”; ticked lines get fixed.'),
         el('p', {}, '“Levels” are brightness steps out of 255. A pattern 10 levels strong is obvious; 1 level is faint; 0.3 is invisible.'),
         el('p', {}, 'The Clean-up setting at the top decides how far to go. Standard fixes what it finds without softening the photo. Strong and Maximum also remove grain and block edges everywhere, which is what makes a difference you can see after the photo is compressed again.'),
-        el('p', {}, 'Brush holds a fix back where you paint. Save JPEG writes the file, then reopens it and checks what survived.'),
+        el('p', {}, 'Brush holds a fix back where you paint.'),
+        el('p', {}, '“Going to” decides how the file is written. For Reddit and most apps it is written at their own quality and settled so their re-save changes nothing; the As posted view shows exactly what a downloader will get, and Split puts the untouched photo through the same re-save for comparison.'),
       ),
     );
     this.findingsEl = el('div', { class: 'findings' });
@@ -368,6 +376,7 @@ export class App {
   }
 
   private queueRender(): void {
+    if (this.viewer.mode !== 'posted' && this.viewer.mode !== 'posted-source') this.checked = false;
     this.renderQueued = true;
     if (this.rendering) return;
     void this.flushRender();
@@ -386,9 +395,20 @@ export class App {
   }
 
   private setMode(mode: ViewMode): void {
+    if (mode === 'posted' && !this.checked) {
+      if (!this.analysis || this.busy) return;
+      void this.doExport(false).then(() => this.setMode('posted'));
+      return;
+    }
     this.viewer.mode = mode;
     for (const [m, b] of this.modeButtons) b.classList.toggle('on', m === mode);
     this.diffRange.style.display = mode === 'difference' ? '' : 'none';
+    if (mode === 'posted') {
+      // split compares against the untouched photo after the same re-save
+      void this.client.render({ region: { kind: 'preview' }, mode: 'posted-source', layers: [], master: 1, diffGain: 1, maskId: null }).then((r) => this.viewer.setOriginalPreview(r));
+    } else if (this.info) {
+      void this.client.render({ region: { kind: 'preview' }, mode: 'original', layers: [], master: 1, diffGain: 1, maskId: null }).then((r) => this.viewer.setOriginalPreview(r));
+    }
     this.queueRender();
   }
 
@@ -417,6 +437,7 @@ export class App {
     this.viewer.split = !this.viewer.split;
     this.splitBtn.classList.toggle('on', this.viewer.split);
     this.viewer.draw();
+    this.viewer.refreshCrop();
   }
 
   // --- loading -----------------------------------------------------------------
@@ -466,9 +487,11 @@ export class App {
     this.masks.clear();
     this.selected = null;
     this.report = null;
+    this.checked = false;
     if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
     this.jpegUrl = null;
     this.exportBtn.disabled = true;
+    if (this.viewer.mode === 'posted') this.setMode('result');
     this.viewer.setImage(info.w, info.h, info.preview.scale);
     this.renderSource();
     this.spectrum.setAnalysis(null, null);
@@ -881,47 +904,80 @@ export class App {
   private renderExport(): void {
     const box = this.exportEl;
     box.innerHTML = '';
-    const o = this.exportOptions;
-    box.appendChild(el('div', { class: 'intro' }, 'Always a fresh JPEG. After saving, the file is reopened and checked, and you get a report of what survived.'));
-    const q = el('input', { type: 'range', min: '60', max: '100', value: String(o.quality) }) as HTMLInputElement;
-    const qv = el('span', { class: 'val' }, String(o.quality));
-    q.addEventListener('input', () => {
-      o.quality = Number(q.value);
-      qv.textContent = q.value;
+    const prof = resolveProfile(this.profileId, this.exportOptions);
+    const sel = el('select') as HTMLSelectElement;
+    for (const p of Object.values(PROFILES)) {
+      const o = el('option', { value: p.id }, p.label) as HTMLOptionElement;
+      if (p.id === this.profileId) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => {
+      this.profileId = sel.value as ProfileId;
+      this.checked = false;
+      this.report = null;
+      this.renderExport();
+      const sl = PROFILES[this.profileId].suggestedLevel;
+      if (sl && this.level === 'standard' && this.profileId === 'reddit') this.setStatus('Tip: Strong clean-up is the better match for Reddit; at Standard the grain looks unchanged after their compression.');
     });
-    box.appendChild(el('div', { class: 'row', title: '95 keeps nearly everything; below 90 the blocky look creeps back in' }, el('span', {}, 'Quality'), q, qv));
-    const chroma = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    chroma.checked = o.chroma === '4:4:4';
-    chroma.addEventListener('change', () => (o.chroma = chroma.checked ? '4:4:4' : '4:2:0'));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Colour'), el('label', { title: 'Off halves the colour resolution, like most cameras and apps do; on keeps it (slightly bigger file)' }, chroma, ' keep full colour detail'), el('span')));
+    box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Going to'), sel));
+    box.appendChild(el('div', { class: 'intro' }, prof.hint));
 
-    const adv = el('details', { class: 'advanced' }, el('summary', {}, 'File options'));
-    const prog = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    prog.checked = o.progressive;
-    prog.addEventListener('change', () => (o.progressive = prog.checked));
-    const trellis = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    trellis.checked = o.trellis;
-    trellis.addEventListener('change', () => (o.trellis = trellis.checked));
-    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Progressive'), el('label', {}, prog, ' the picture loads in passes on the web; same quality, slightly smaller'), el('span')));
-    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Trellis'), el('label', {}, trellis, ' spend longer encoding for a smaller file; same quality'), el('span')));
-    box.appendChild(adv);
+    if (this.profileId === 'custom') {
+      const o = this.exportOptions;
+      const q = el('input', { type: 'range', min: '50', max: '100', value: String(o.quality) }) as HTMLInputElement;
+      const qv = el('span', { class: 'val' }, String(o.quality));
+      q.addEventListener('input', () => {
+        o.quality = Number(q.value);
+        qv.textContent = q.value;
+      });
+      box.appendChild(el('div', { class: 'row', title: 'Match the quality of the place the photo is going; the file is settled at that quality so a re-save there changes nothing' }, el('span', {}, 'Quality'), q, qv));
+      const chroma = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      chroma.checked = o.chroma === '4:4:4';
+      chroma.addEventListener('change', () => (o.chroma = chroma.checked ? '4:4:4' : '4:2:0'));
+      box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Colour'), el('label', { title: 'Off halves the colour resolution, like most apps do; on keeps it' }, chroma, ' keep full colour detail'), el('span')));
+      const fp = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      fp.checked = o.fixedPointPasses > 0;
+      fp.addEventListener('change', () => (o.fixedPointPasses = fp.checked ? 3 : 0));
+      box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Settle'), el('label', { title: 'Re-encode until the file stops changing, so the destination’s own re-save is a no-op' }, fp, ' make the file a fixed point of this quality'), el('span')));
+      const adv = el('details', { class: 'advanced' }, el('summary', {}, 'File options'));
+      const prog = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      prog.checked = o.progressive;
+      prog.addEventListener('change', () => (o.progressive = prog.checked));
+      const trellis = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      trellis.checked = o.trellis;
+      trellis.addEventListener('change', () => (o.trellis = trellis.checked));
+      const tables = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      tables.checked = o.tables === 'annex-k';
+      tables.addEventListener('change', () => (o.tables = tables.checked ? 'annex-k' : 'mozjpeg'));
+      adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Progressive'), el('label', {}, prog, ' loads in passes on the web; same quality'), el('span')));
+      adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Trellis'), el('label', {}, trellis, ' slower encode, smaller file; off when settling'), el('span')));
+      adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Standard tables'), el('label', {}, tables, ' use the same rounding tables as other apps (needed to settle)'), el('span')));
+      box.appendChild(adv);
+    } else {
+      const e = prof.encode;
+      box.appendChild(
+        el(
+          'div',
+          { class: 'facts' },
+          el('span', {}, 'written as'),
+          el('b', {}, `quality ${e.quality}, ${e.chroma === '4:4:4' ? 'full' : 'reduced'} colour detail${e.fixedPointPasses ? ', settled' : ''}`),
+          el('span', {}, 'check simulates'),
+          el('b', {}, prof.check.label),
+        ),
+      );
+    }
 
     const b = this.budget;
-    const check = el('details', { class: 'advanced' }, el('summary', {}, 'What counts as a problem in the saved file'));
+    const check = el('details', { class: 'advanced' }, el('summary', {}, 'What counts as a problem in the downloader’s copy'));
     const lv = el('input', { type: 'number', min: '0.1', max: '20', step: '0.1', value: String(b.minPeakLevels) }) as HTMLInputElement;
     lv.addEventListener('change', () => (b.minPeakLevels = Number(lv.value)));
-    const blk = el('input', { type: 'number', min: '1', max: '50', step: '1', value: String(Math.round(b.maxBlockStrength * 100)) }) as HTMLInputElement;
-    blk.addEventListener('change', () => (b.maxBlockStrength = Number(blk.value) / 100));
-    const lossLevels = 255 / Math.pow(10, b.minEncodePsnr / 20);
-    const loss = el('input', { type: 'number', min: '0.3', max: '12', step: '0.1', value: lossLevels.toFixed(1) }) as HTMLInputElement;
-    loss.addEventListener('change', () => (b.minEncodePsnr = 20 * Math.log10(255 / Math.max(0.1, Number(loss.value)))));
     check.appendChild(el('div', { class: 'row' }, el('span', {}, 'A pattern'), el('span', {}, 'still visible at ', lv, ' levels or more'), el('span')));
-    check.appendChild(el('div', { class: 'row' }, el('span', {}, 'Block edges'), el('span', {}, 'stronger than ', blk, ' % above the texture'), el('span')));
-    check.appendChild(el('div', { class: 'row' }, el('span', {}, 'Saving itself'), el('span', {}, 'changed pixels by more than ', loss, ' levels on average'), el('span')));
+    check.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'Each fix is also judged on its own: how much of it is left in the copy, compared with the untouched photo given the same re-save.'));
     box.appendChild(check);
 
     const actions = el('div', { class: 'actions' });
-    actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
+    actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(true), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
+    actions.appendChild(el('button', { onclick: () => void this.doExport(false), disabled: this.analysis ? undefined : '', title: 'Run the check and show the As posted view without downloading' }, 'Check only'));
     actions.appendChild(el('button', { onclick: () => this.downloadRecipe(), disabled: this.analysis ? undefined : '', title: 'Everything you set here, as a file you can load for another photo' }, 'Save settings file'));
     box.appendChild(actions);
 
@@ -937,10 +993,36 @@ export class App {
 
   private renderReport(r: RoundTripReport): HTMLElement {
     const box = el('div', { class: `report ${r.pass ? 'pass' : 'fail'}` });
-    box.appendChild(el('div', { class: 'verdict' }, r.pass ? 'Checked the saved file: all clear' : 'Checked the saved file: problems remain'));
-    if (r.reasons.length) {
+    box.appendChild(el('div', { class: 'verdict' }, r.pass ? `After ${r.checkLabel}: every fix holds` : `After ${r.checkLabel}: not everything holds`));
+    box.appendChild(el('div', { class: 'intro' }, 'What a downloader gets, compared with the untouched photo given the same re-save. Use the As posted view and Split to see it.'));
+    const tbl = el('table', { class: 'survival' });
+    tbl.appendChild(el('tr', {}, el('th', {}, 'fix'), el('th', {}, 'untouched'), el('th', {}, 'yours'), el('th', {}, 'kept')));
+    for (const fx of r.survival.fixes) {
+      const f = this.analysis?.findings.find((x) => x.id === fx.id);
+      const name = f ? plainLabel(f) : fx.label;
+      const unit = fx.unit === 'pixels' ? '' : ' lv';
+      const row = el(
+        'tr',
+        { class: fx.verdict, title: fx.note },
+        el('td', {}, name),
+        el('td', {}, `${fmt(fx.sourceOnDest, fx.unit === 'pixels' ? 0 : 2)}${unit}`),
+        el('td', {}, `${fmt(fx.resultOnDest, fx.unit === 'pixels' ? 0 : 2)}${unit}`),
+        el('td', {}, fx.verdict === 'survives' ? 'yes' : fx.verdict === 'partly' ? `${Math.round(fx.retained * 100)} %` : 'no'),
+      );
+      tbl.appendChild(row);
+    }
+    box.appendChild(tbl);
+    const notes: string[] = [];
+    for (const fx of r.survival.fixes) {
+      if (fx.verdict === 'survives') continue;
+      const f = this.analysis?.findings.find((x) => x.id === fx.id);
+      const name = f ? plainLabel(f) : fx.label;
+      notes.push(`${name}: ${fx.note}`);
+    }
+    notes.push(...r.reasons);
+    if (notes.length) {
       const ul = el('ul');
-      for (const s of r.reasons) ul.appendChild(el('li', {}, s));
+      for (const t of notes) ul.appendChild(el('li', {}, t));
       box.appendChild(ul);
     }
     const facts = el('div', { class: 'facts' });
@@ -949,41 +1031,19 @@ export class App {
       facts.appendChild(el('b', {}, v));
     };
     fact('file', `${(r.bytes / 1024).toFixed(0)} kB, quality ${r.quality}, ${r.chroma === '4:4:4' ? 'full colour detail' : 'reduced colour detail'}`);
-    fact('saving changed pixels by', `${fmt(r.encodeRmsLevels, 2)} levels on average`);
-    fact('patterns still visible', r.residualPeriodic ? r.residual.map((f) => (f.kind === 'periodic' ? `every ${fmt(f.details.period, 1)} px, ${fmt(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255, 1)} levels` : '')).join('; ') : 'none');
-    fact('block edges', r.blockGrid.detected ? `steps of ${fmt(r.blockGrid.stepLevels, 2)} levels${r.blockGrid.stepLevels < 0.5 ? ' (invisible)' : ''}` : 'none found');
-    fact('grain left', r.noise.expectedLevels > 0 ? `${fmt((100 * r.noise.globalSigmaLevels) / r.noise.expectedLevels, 0)} % of what the photo had` : 'n/a');
+    if (r.passes > 1) fact('settled', r.stable ? `yes, in ${r.passes} passes: a re-save there reproduces it` : `not fully after ${r.passes} passes`);
+    fact('block edges, downloader’s copy', `${fmt(r.survival.blockStepLevels.resultOnDest, 2)} lv (untouched photo: ${fmt(r.survival.blockStepLevels.sourceOnDest, 2)})`);
+    fact('grain, downloader’s copy', `${fmt(r.survival.grainLevels.resultOnDest, 2)} lv (untouched photo: ${fmt(r.survival.grainLevels.sourceOnDest, 2)})`);
+    fact('patterns visible', r.residualPeriodic ? r.residual.map((f) => (f.kind === 'periodic' ? `every ${fmt(f.details.period, 1)} px, ${fmt(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255, 1)} lv` : '')).join('; ') : 'none');
+    fact('saving changed pixels by', `${fmt(r.encodeRmsLevels, 2)} lv on average`);
     box.appendChild(facts);
     const actions = el('div', { class: 'actions' });
     if (this.jpegUrl) {
       const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';
-      actions.appendChild(el('a', { href: this.jpegUrl, download: name }, `Download ${name} again`));
+      actions.appendChild(el('a', { href: this.jpegUrl, download: name }, `Download ${name}`));
     }
-    if (!r.pass && r.quality < 100 && r.reasons.some((s) => s.includes('saving changed') || s.includes('block edges')))
-      actions.appendChild(
-        el(
-          'button',
-          {
-            onclick: () => {
-              this.exportOptions.quality = Math.min(100, this.exportOptions.quality + 2);
-              this.renderExport();
-              void this.doExport();
-            },
-          },
-          `Save again at quality ${Math.min(100, r.quality + 2)}`,
-        ),
-      );
-    for (const sf of r.suggested) {
-      actions.appendChild(
-        el(
-          'button',
-          {
-            onclick: () => void this.adoptSuggested(sf),
-          },
-          `Add fix: ${plainLabel(sf).toLowerCase()}`,
-        ),
-      );
-    }
+    actions.appendChild(el('button', { onclick: () => this.setMode('posted') }, 'Show as posted'));
+    for (const sf of r.suggested) actions.appendChild(el('button', { onclick: () => void this.adoptSuggested(sf) }, `Add fix: ${plainLabel(sf).toLowerCase()}`));
     actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadReport() }, 'Full report (JSON)'));
     box.appendChild(actions);
     return box;
@@ -1003,27 +1063,32 @@ export class App {
     this.setStatus(`${plainLabel(copy)} added — save again to check it`);
   }
 
-  private async doExport(): Promise<void> {
+  private async doExport(download = true): Promise<void> {
     if (!this.analysis || this.busy) return;
     this.busy = true;
     this.exportBtn.disabled = true;
     try {
-      const { jpeg, report } = await this.client.export(this.layerSettings(), this.master, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
-        this.setStatus(`Saving: ${stage.replace('verify:', 'checking the saved file — ')}`, fr),
+      const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
+        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
       );
       if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
       this.report = report;
-      this.setStatus(report.pass ? `Saved ${(jpeg.length / 1024).toFixed(0)} kB and checked it: all clear` : `Saved ${(jpeg.length / 1024).toFixed(0)} kB; the check found problems, see the report`);
+      this.checked = true;
+      const kept = report.survival.fixes.filter((f) => f.verdict === 'survives').length;
+      this.setStatus(
+        `${download ? 'Saved' : 'Checked'} ${(jpeg.length / 1024).toFixed(0)} kB: ${kept} of ${report.survival.fixes.length} fixes fully survive ${report.checkLabel}${report.pass ? '' : ' — see the report'}`,
+      );
       this.renderExport();
-      // offer the download right away
-      const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';
-      const a = document.createElement('a');
-      a.href = this.jpegUrl;
-      a.download = name;
-      a.click();
+      if (download) {
+        const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';
+        const a = document.createElement('a');
+        a.href = this.jpegUrl;
+        a.download = name;
+        a.click();
+      }
     } catch (e) {
-      this.setStatus(`Saving failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.setStatus(`${download ? 'Saving' : 'Checking'} failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       this.busy = false;
       this.exportBtn.disabled = false;
@@ -1037,6 +1102,7 @@ export class App {
       r.name = file.name;
       this.recipe = r;
       if (r.exportOptions) this.exportOptions = { ...this.exportOptions, ...r.exportOptions };
+      if (r.profile && r.profile in PROFILES) this.profileId = r.profile;
       if (r.budget) this.budget = { ...this.budget, ...r.budget };
       if (r.analysisOptions) this.analysisOptions = { ...r.analysisOptions };
       if (typeof r.master === 'number') {
@@ -1102,7 +1168,7 @@ export class App {
         await this.open(f);
         if (!this.analysis) throw new Error('analysis failed');
         this.busy = true;
-        const { jpeg, report } = await this.client.export(this.layerSettings(), this.master, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
+        const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
           this.setStatus(`Batch ${i + 1}/${files.length}: ${f.name} — ${stage}`, fr),
         );
         this.report = report;
@@ -1137,6 +1203,7 @@ export class App {
       version: 1,
       source: this.info?.meta.fileName,
       master: this.master,
+      profile: this.profileId,
       analysisOptions: this.analysisOptions,
       exportOptions: this.exportOptions,
       budget: this.budget,

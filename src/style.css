@@ -521,3 +521,32 @@ input[type='number'] {
   color: var(--ink-soft);
   white-space: nowrap;
 }
+
+table.survival {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 6px 0;
+}
+table.survival th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink-faint);
+  padding: 2px 4px;
+}
+table.survival td {
+  padding: 2px 4px;
+  border-top: 1px solid var(--line);
+}
+table.survival td:nth-child(n + 2) {
+  text-align: right;
+  white-space: nowrap;
+}
+table.survival tr.survives td:last-child {
+  color: var(--pass);
+}
+table.survival tr.partly td:last-child {
+  color: var(--warn);
+}
+table.survival tr.lost td:last-child {
+  color: var(--fail);
+}

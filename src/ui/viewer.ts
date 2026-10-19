@@ -15,6 +15,8 @@ export interface MaskBrush {
 export interface ViewerCallbacks {
   /** Ask for a full-resolution crop (x0, y0, w, h in image pixels). */
   requestCrop: (x0: number, y0: number, w: number, h: number) => Promise<RenderResult>;
+  /** The same crop of the comparison side (the untouched photo, or the untouched photo as posted). */
+  requestCropOriginal: (x0: number, y0: number, w: number, h: number) => Promise<RenderResult>;
   /** Ask for the preview-resolution render of the current mode. */
   requestPreview: () => Promise<RenderResult>;
   /** Mask stroke finished; the local mask has changed. */
@@ -42,6 +44,7 @@ export class Viewer {
   private preview: ImageBitmap | null = null; // current mode at preview res
   private previewOriginal: ImageBitmap | null = null; // for split compare
   private crop: { bmp: ImageBitmap; x0: number; y0: number } | null = null;
+  private cropOrig: { bmp: ImageBitmap; x0: number; y0: number } | null = null;
   private cropRequest = 0;
 
   // mask painting
@@ -93,6 +96,7 @@ export class Viewer {
     this.preview = null;
     this.previewOriginal = null;
     this.crop = null;
+    this.cropOrig = null;
     this.mask = null;
     this.dropHint.style.display = w ? 'none' : '';
     this.fit();
@@ -168,6 +172,8 @@ export class Viewer {
       if (this.crop && !this.needsCrop()) {
         this.crop.bmp.close();
         this.crop = null;
+        this.cropOrig?.bmp.close();
+        this.cropOrig = null;
       }
       return;
     }
@@ -178,13 +184,24 @@ export class Viewer {
     const y1 = Math.min(this.imageH, Math.ceil((r.height - this.panY) / this.zoom));
     if (!force && this.crop && this.crop.x0 === x0 && this.crop.y0 === y0 && this.crop.bmp.width === x1 - x0 && this.crop.bmp.height === y1 - y0) return;
     const id = ++this.cropRequest;
-    void this.cb.requestCrop(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0)).then(async (res) => {
+    const cw = Math.max(1, x1 - x0);
+    const chh = Math.max(1, y1 - y0);
+    void this.cb.requestCrop(x0, y0, cw, chh).then(async (res) => {
       if (id !== this.cropRequest) return;
       const bmp = await createImageBitmap(new ImageData(res.rgba, res.w, res.h));
       this.crop?.bmp.close();
       this.crop = { bmp, x0, y0 };
       this.draw();
     });
+    if (this.split) {
+      void this.cb.requestCropOriginal(x0, y0, cw, chh).then(async (res) => {
+        if (id !== this.cropRequest) return;
+        const bmp = await createImageBitmap(new ImageData(res.rgba, res.w, res.h));
+        this.cropOrig?.bmp.close();
+        this.cropOrig = { bmp, x0, y0 };
+        this.draw();
+      });
+    }
   }
 
   // --- drawing ---------------------------------------------------------------
@@ -211,7 +228,7 @@ export class Viewer {
       ctx.beginPath();
       ctx.rect(0, 0, half, r.height);
       ctx.clip();
-      drawBitmap(this.previewOriginal);
+      drawBitmap(this.previewOriginal, this.cropOrig);
       ctx.restore();
       ctx.save();
       ctx.beginPath();
@@ -369,5 +386,9 @@ export class Viewer {
 
   getZoom(): number {
     return this.zoom;
+  }
+
+  refreshCrop(): void {
+    this.scheduleCrop(true);
   }
 }

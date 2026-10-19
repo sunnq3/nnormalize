@@ -4,14 +4,15 @@
  * code so it can also be driven directly in tests.
  */
 
-import { decode as mozDecode } from '@jsquash/jpeg';
 import { analyze } from '../analysis/analyze';
+import { measureSurvival } from '../analysis/survival';
 import { computeDelta } from '../analysis/apply';
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
 import { describeFrequency, measurePattern } from '../dsp/pattern';
 import { lumaPlane, makePlane, type Plane } from '../dsp/plane';
 import type { TileGrid } from '../dsp/tiles';
-import { encodeToJpeg, type JpegExportOptions } from '../io/encode';
+import { decodeJpegToPlanes, encodeToJpeg, simulateReencode, type JpegExportOptions } from '../io/encode';
+import { resolveProfile, type ProfileId } from './profiles';
 import { decodeImage, type SourceImage, type SourceMeta } from '../io/decode';
 import { parseJpeg } from '../io/jpegParse';
 import { psnr, rng, synthesize } from '../synth/generate';
@@ -44,6 +45,10 @@ export class Engine {
   analysis: Analysis | null = null;
   layers = new Map<string, Layer>();
   private manualCount = 0;
+  /** after a check: the result and the untouched source as the destination re-saves them, full resolution, 8-bit RGB */
+  postedResult: Uint8Array | null = null;
+  postedSource: Uint8Array | null = null;
+  private postedPreview: { result: Float32Array[]; source: Float32Array[] } | null = null;
   masks = new Map<string, Mask>();
   previewScale = 1;
   pw = 0;
@@ -124,6 +129,9 @@ export class Engine {
     this.analysis = null;
     this.layers.clear();
     this.masks.clear();
+    this.postedResult = null;
+    this.postedSource = null;
+    this.postedPreview = null;
     const long = Math.max(img.w, img.h);
     const target = 1600;
     const factor = Math.max(1, Math.ceil(long / target));
@@ -408,6 +416,33 @@ export class Engine {
     const rgba = new Uint8ClampedArray(new ArrayBuffer(w * h * 4));
     const chans: Float32Array[] = [];
     const srcChans: Float32Array[] = [];
+    if (req.mode === 'posted' || req.mode === 'posted-source') {
+      const buf = req.mode === 'posted' ? this.postedResult : this.postedSource;
+      if (!buf) throw new Error('run a check first');
+      if (isPreview) {
+        const pv = req.mode === 'posted' ? this.postedPreview!.result : this.postedPreview!.source;
+        for (let i = 0, j = 0; i < w * h; i++, j += 4) {
+          rgba[j] = Math.round(255 * pv[0][i]);
+          rgba[j + 1] = Math.round(255 * pv[1][i]);
+          rgba[j + 2] = Math.round(255 * pv[2][i]);
+          rgba[j + 3] = 255;
+        }
+      } else {
+        const r = region as { x0: number; y0: number; w: number; h: number };
+        const W = this.source.w;
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const si = ((r.y0 + y) * W + r.x0 + x) * 3;
+            const j = (y * w + x) * 4;
+            rgba[j] = buf[si];
+            rgba[j + 1] = buf[si + 1];
+            rgba[j + 2] = buf[si + 2];
+            rgba[j + 3] = 255;
+          }
+        }
+      }
+      return { w, h, rgba };
+    }
     for (let c = 0; c < 3; c++) {
       let comp: Float32Array;
       let src: Float32Array;
@@ -468,51 +503,53 @@ export class Engine {
   // --- export --------------------------------------------------------------
   async exportJpeg(
     layers: LayerSetting[],
+    findings: Finding[],
     master: number,
-    options: JpegExportOptions,
+    profileId: ProfileId,
+    customOptions: JpegExportOptions,
     budget: Budget,
     analysisOptions: Partial<AnalysisOptions>,
     progress: (stage: string, fraction: number) => void,
   ): Promise<{ jpeg: Uint8Array; report: RoundTripReport }> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
+    const profile = resolveProfile(profileId, customOptions);
+    const opts = profile.encode;
     progress('compose', 0);
     const composed = this.compose(layers, master);
     progress('encode', 0);
     const meta = this.source.meta;
-    const jpeg = await encodeToJpeg(composed, options, { exif: meta.exif, icc: meta.icc, xmp: meta.xmp });
-    progress('verify', 0);
-    const report = await this.roundTrip(jpeg, composed, options, budget, analysisOptions, progress);
-    return { jpeg, report };
-  }
+    const enc = await encodeToJpeg(composed, opts, { exif: meta.exif, icc: meta.icc, xmp: meta.xmp }, (pass) =>
+      progress('encode', Math.min(1, pass / Math.max(1, opts.fixedPointPasses + 1))),
+    );
+    const jpeg = enc.jpeg;
 
-  private async roundTrip(
-    jpeg: Uint8Array,
-    composed: [Plane, Plane, Plane],
-    options: JpegExportOptions,
-    budget: Budget,
-    analysisOptions: Partial<AnalysisOptions>,
-    progress: (stage: string, fraction: number) => void,
-  ): Promise<RoundTripReport> {
-    const img = await mozDecode(jpeg.buffer.slice(jpeg.byteOffset, jpeg.byteOffset + jpeg.byteLength) as ArrayBuffer);
-    const { width: w, height: h } = img;
-    const planes: [Plane, Plane, Plane] = [makePlane(w, h), makePlane(w, h), makePlane(w, h)];
-    for (let i = 0, j = 0; i < w * h; i++, j += 4) {
-      planes[0].data[i] = img.data[j] / 255;
-      planes[1].data[i] = img.data[j + 1] / 255;
-      planes[2].data[i] = img.data[j + 2] / 255;
-    }
-    const lumDec = lumaPlane(planes[0], planes[1], planes[2]);
+    // --- what a downloader gets: our file after the destination's re-save,
+    // and the untouched photo after the same re-save --------------------------
+    progress('check', 0);
+    const ours = await decodeJpegToPlanes(jpeg);
+    const resDest = (await simulateReencode(ours, profile.check.options)).planes;
+    progress('check', 0.4);
+    const srcDest = (await simulateReencode(this.source.planes, profile.check.options)).planes;
+    progress('check', 0.7);
+    this.storePosted(resDest, srcDest);
+
+    // encode error of our own file vs the composed float result
     const lumComp = lumaPlane(composed[0], composed[1], composed[2]);
-    const encodePsnr = psnr(lumComp, lumDec);
-    let s = 0;
-    for (let i = 0; i < lumDec.data.length; i++) s += (lumDec.data[i] - lumComp.data[i]) ** 2;
-    const encodeRmsLevels = Math.sqrt(s / lumDec.data.length) * 255;
+    const lumOurs = lumaPlane(ours[0], ours[1], ours[2]);
+    let sq = 0;
+    for (let i = 0; i < lumOurs.data.length; i++) sq += (lumOurs.data[i] - lumComp.data[i]) ** 2;
+    const encodeRmsLevels = Math.sqrt(sq / lumOurs.data.length) * 255;
+    const encodePsnr = psnr(lumComp, lumOurs);
 
+    const survival = measureSurvival(this.source.planes, srcDest, resDest, findings);
+    progress('check', 0.85);
+
+    // residual periodic components on the downloader's copy
     const info = parseJpeg(jpeg);
     const a = analyze(
-      { planes, dpi: this.source!.meta.dpi, sourceQuality: options.quality, sourceSubsampling: info.subsampling },
+      { planes: resDest, dpi: this.source.meta.dpi, sourceQuality: profile.check.options.quality, sourceSubsampling: profile.check.options.chroma },
       { ...analysisOptions, quick: true, maxWelchTiles: 16 },
-      (st, fr) => progress('verify:' + st, fr),
+      (st, fr) => progress('check:' + st, fr),
     );
     const residual = a.findings.filter(
       (f) => f.kind === 'periodic' && f.details.excessDb > budget.maxPeakDb && Math.max(f.details.amplitude, f.details.amplitudeP90) * 255 >= budget.minPeakLevels,
@@ -520,49 +557,68 @@ export class Engine {
     const reasons: string[] = [];
     if (residual.length)
       reasons.push(
-        `${residual.length} repeating pattern${residual.length > 1 ? 's are' : ' is'} still visible in the saved file (${residual
+        `${residual.length} repeating pattern${residual.length > 1 ? 's are' : ' is'} visible in the downloader's copy (${residual
           .map((f) => (f.kind === 'periodic' ? `every ${f.details.period.toFixed(1)} px, ${(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255).toFixed(1)} levels` : ''))
           .join('; ')})`,
       );
     const bs = Math.max(a.blockGrid.strengthX, a.blockGrid.strengthY);
     const bstep = a.blockGrid.stepLevels;
-    // a grid only counts when it is both relatively and absolutely there: a
-    // 0.2-level step is a measurement, not something anyone can see
     const gridVisible = a.blockGrid.detected && bs > budget.maxBlockStrength && bstep >= 0.5;
-    if (gridVisible) reasons.push(`block edges are still visible: steps of ${bstep.toFixed(1)} levels, ${(bs * 100).toFixed(0)} % above the texture`);
-    if (encodePsnr < budget.minEncodePsnr)
-      reasons.push(
-        `saving changed pixels by ${encodeRmsLevels.toFixed(1)} levels on average, more than the ${(255 / Math.pow(10, budget.minEncodePsnr / 20)).toFixed(1)} allowed: the JPEG dropped fine grain or detail; raise the quality to keep more`,
-      );
-    // Fixes the output analysis can see that the source analysis could not:
-    // a block grid hidden under strong interference, or a periodic component
-    // the source thresholds missed.
+    // fixes the check can see that the first analysis could not
     const suggested: Finding[] = [];
-    const src = this.analysis!;
+    const src = { findings };
     const gridAlready = src.findings.some((f) => f.kind === 'jpeg-grid');
     const outGrid = a.findings.find((f) => f.kind === 'jpeg-grid');
-    if (outGrid && !gridAlready && gridVisible) suggested.push({ ...outGrid, id: 'jpeg-grid', note: 'Seen in the saved file; it was hidden under the patterns when the photo was first checked.' });
+    if (outGrid && !gridAlready && gridVisible) suggested.push({ ...outGrid, id: 'jpeg-grid', note: 'Seen in the downloader’s copy; it was hidden under the patterns when the photo was first checked.' });
     for (const f of residual) {
       const tol = 2 / a.spectrum.size;
       const known = src.findings.some(
         (g) => g.kind === 'periodic' && f.kind === 'periodic' && ((Math.abs(g.details.u - f.details.u) < tol && Math.abs(g.details.v - f.details.v) < tol) || (Math.abs(g.details.u + f.details.u) < tol && Math.abs(g.details.v + f.details.v) < tol)),
       );
-      if (!known) suggested.push({ ...f, id: `verify-${suggested.length}`, note: 'Seen in the saved file, not when the photo was first checked.' });
+      if (!known) suggested.push({ ...f, id: `verify-${suggested.length}`, note: 'Seen in the downloader’s copy, not when the photo was first checked.' });
     }
-    return {
-      suggested,
+    const report: RoundTripReport = {
       encodePsnr,
       encodeRmsLevels,
       bytes: jpeg.length,
-      quality: options.quality,
+      quality: opts.quality,
       chroma: info.subsampling,
+      profile: profile.id,
+      profileLabel: profile.label,
+      passes: enc.passes,
+      stable: enc.stable,
+      checkLabel: profile.check.label,
+      survival,
       residual,
       residualPeriodic: residual.length,
       blockGrid: { detected: a.blockGrid.detected, strength: bs, stepLevels: bstep },
-      noise: { globalSigmaLevels: a.noise.globalSigma * 255, expectedLevels: (this.analysis?.noise.globalSigma ?? 0) * 255 },
-      pass: reasons.length === 0,
+      noise: { globalSigmaLevels: survival.grainLevels.resultOnDest, expectedLevels: survival.grainLevels.sourceOnDest },
+      suggested,
+      pass: survival.pass && residual.length === 0,
       reasons,
       budget,
+    };
+    return { jpeg, report };
+  }
+
+  private storePosted(res: [Plane, Plane, Plane], srcd: [Plane, Plane, Plane]): void {
+    const w = res[0].w;
+    const h = res[0].h;
+    const pack = (p: [Plane, Plane, Plane]): Uint8Array => {
+      const out = new Uint8Array(w * h * 3);
+      for (let i = 0, j = 0; i < w * h; i++, j += 3) {
+        out[j] = Math.round(p[0].data[i] * 255);
+        out[j + 1] = Math.round(p[1].data[i] * 255);
+        out[j + 2] = Math.round(p[2].data[i] * 255);
+      }
+      return out;
+    };
+    this.postedResult = pack(res);
+    this.postedSource = pack(srcd);
+    const factor = Math.round(1 / this.previewScale);
+    this.postedPreview = {
+      result: res.map((p) => areaDownsample(p.data, w, h, factor, this.pw, this.ph)),
+      source: srcd.map((p) => areaDownsample(p.data, w, h, factor, this.pw, this.ph)),
     };
   }
 

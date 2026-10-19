@@ -6,6 +6,8 @@
 
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
 import type { JpegExportOptions } from '../io/encode';
+import type { SurvivalReport } from '../analysis/survival';
+import type { ProfileId } from './profiles';
 import type { SourceMeta } from '../io/decode';
 
 export interface LayerSetting {
@@ -13,7 +15,8 @@ export interface LayerSetting {
   strength: number; // 0..2
 }
 
-export type ViewMode = 'original' | 'result' | 'difference' | 'mask';
+/** 'posted' = our result after the destination's re-save; 'posted-source' = the untouched photo after the same re-save */
+export type ViewMode = 'original' | 'result' | 'difference' | 'mask' | 'posted' | 'posted-source';
 
 export interface RenderRequest {
   region: { kind: 'preview' } | { kind: 'crop'; x0: number; y0: number; w: number; h: number };
@@ -52,6 +55,15 @@ export interface RoundTripReport {
   bytes: number;
   quality: number;
   chroma: string;
+  profile: ProfileId;
+  profileLabel: string;
+  /** fixed-point encoding: how many passes it took and whether the bytes settled */
+  passes: number;
+  stable: boolean;
+  /** what the check simulated */
+  checkLabel: string;
+  /** per-fix survival through the simulated re-save, plus the before/after a downloader sees */
+  survival: SurvivalReport;
   /** findings re-detected on the decoded output */
   residual: Finding[];
   residualPeriodic: number;
@@ -90,7 +102,18 @@ export type Request =
   | { type: 'delta'; id: number; finding: Finding }
   | { type: 'setMask'; id: number; findingId: string; w: number; h: number; data: Uint8Array }
   | { type: 'render'; id: number; req: RenderRequest }
-  | { type: 'export'; id: number; layers: LayerSetting[]; master: number; options: JpegExportOptions; budget: Budget; analysisOptions: Partial<AnalysisOptions> }
+  | {
+      type: 'export';
+      id: number;
+      layers: LayerSetting[];
+      /** the findings as the person has set them (ticks, strengths, methods); the worker's own copy does not see those edits */
+      findings: Finding[];
+      master: number;
+      profile: ProfileId;
+      options: JpegExportOptions;
+      budget: Budget;
+      analysisOptions: Partial<AnalysisOptions>;
+    }
   | { type: 'verifyResult'; id: number; layers: LayerSetting[]; master: number; analysisOptions: Partial<AnalysisOptions> }
   | { type: 'presenceMask'; id: number; findingId: string }
   | { type: 'addPeak'; id: number; u: number; v: number }

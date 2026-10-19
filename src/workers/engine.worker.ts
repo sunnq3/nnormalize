@@ -8,18 +8,6 @@ function post(msg: Response, transfer: Transferable[] = []): void {
   ctx.postMessage(msg, transfer);
 }
 
-function transferablesOf(obj: unknown, acc: Transferable[] = [], seen = new Set<unknown>()): Transferable[] {
-  if (!obj || typeof obj !== 'object' || seen.has(obj)) return acc;
-  seen.add(obj);
-  if (ArrayBuffer.isView(obj)) {
-    if (!acc.includes(obj.buffer as ArrayBuffer)) acc.push(obj.buffer as ArrayBuffer);
-    return acc;
-  }
-  if (Array.isArray(obj)) for (const v of obj) transferablesOf(v, acc, seen);
-  else for (const v of Object.values(obj as Record<string, unknown>)) transferablesOf(v, acc, seen);
-  return acc;
-}
-
 ctx.onmessage = async (ev: MessageEvent<Request>) => {
   const msg = ev.data;
   const id = msg.id;
@@ -38,7 +26,7 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
       }
       case 'analyze': {
         const analysis = engine.runAnalysis(msg.options, progress);
-        post({ type: 'analysis', id, analysis }, transferablesOf(analysis));
+        post({ type: 'analysis', id, analysis }); // cloned, not transferred: the engine keeps using these arrays
         break;
       }
       case 'delta': {
@@ -67,7 +55,7 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
       }
       case 'addPeak': {
         const finding = engine.addPeak(msg.u, msg.v);
-        post({ type: 'finding', id, finding }, transferablesOf(finding));
+        post({ type: 'finding', id, finding });
         break;
       }
       case 'render': {
@@ -76,13 +64,13 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
         break;
       }
       case 'export': {
-        const { jpeg, report } = await engine.exportJpeg(msg.layers, msg.master, msg.options, msg.budget, msg.analysisOptions, progress);
-        post({ type: 'export', id, jpeg, report }, [jpeg.buffer, ...transferablesOf(report)]);
+        const { jpeg, report } = await engine.exportJpeg(msg.layers, msg.findings, msg.master, msg.profile, msg.options, msg.budget, msg.analysisOptions, progress);
+        post({ type: 'export', id, jpeg, report }, [jpeg.buffer]);
         break;
       }
       case 'verifyResult': {
         const analysis = engine.verifyResult(msg.layers, msg.master, msg.analysisOptions, progress);
-        post({ type: 'verify', id, analysis }, transferablesOf(analysis));
+        post({ type: 'verify', id, analysis });
         break;
       }
     }
