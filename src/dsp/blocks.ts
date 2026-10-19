@@ -9,6 +9,9 @@ export interface BlockGrid {
   offsetY: number;
   strengthX: number; // excess of boundary differences over the others, 0 = none
   strengthY: number;
+  /** the same excess in absolute terms: mean boundary step above the texture, plane units */
+  stepX: number;
+  stepY: number;
   /** z-like confidence: how far the best phase stands out from the other seven */
   confidenceX: number;
   confidenceY: number;
@@ -42,7 +45,7 @@ export function detectBlockGrid(p: Plane, period = 8): BlockGrid {
     py[y % period] += s;
     ny[y % period] += w;
   }
-  const analyse = (acc: Float64Array, cnt: Float64Array): { offset: number; strength: number; confidence: number } => {
+  const analyse = (acc: Float64Array, cnt: Float64Array): { offset: number; strength: number; confidence: number; step: number } => {
     const m = new Float64Array(period);
     for (let k = 0; k < period; k++) m[k] = cnt[k] ? acc[k] / cnt[k] : 0;
     let best = 0;
@@ -58,7 +61,7 @@ export function detectBlockGrid(p: Plane, period = 8): BlockGrid {
     let v = 0;
     for (let k = 0; k < period; k++) if (k !== best) v += (m[k] - others) ** 2;
     const sd = Math.sqrt(v / n) + 1e-12;
-    return { offset: best, strength: others > 0 ? (m[best] - others) / others : 0, confidence: (m[best] - others) / sd };
+    return { offset: best, strength: others > 0 ? (m[best] - others) / others : 0, confidence: (m[best] - others) / sd, step: Math.max(0, m[best] - others) };
   };
   const ax = analyse(px, nx);
   const ay = analyse(py, ny);
@@ -68,6 +71,8 @@ export function detectBlockGrid(p: Plane, period = 8): BlockGrid {
     offsetY: ay.offset,
     strengthX: ax.strength,
     strengthY: ay.strength,
+    stepX: ax.step,
+    stepY: ay.step,
     confidenceX: ax.confidence,
     confidenceY: ay.confidence,
     detected,
@@ -80,6 +85,8 @@ export interface DeblockOptions {
   maxStep?: number; // default 0.08
   /** the boundary step must exceed this multiple of the neighbouring activity */
   activityRatio?: number; // default 1.5
+  /** pixels the step is spread over: 4 (two each side) or 8 (the whole block width); 8 removes the grid signature entirely */
+  span?: 4 | 8;
 }
 
 /**
@@ -92,15 +99,19 @@ export function deblockDelta(p: Plane, grid: BlockGrid, opts: DeblockOptions = {
   const period = opts.period ?? 8;
   const maxStep = opts.maxStep ?? 0.08;
   const ratio = opts.activityRatio ?? 1.5;
+  const span = opts.span ?? 4;
   const { w, h } = p;
   const work = new Float32Array(p.data);
   const delta = makePlane(w, h);
-  const taps = [1 / 8, 3 / 8, -3 / 8, -1 / 8];
+  // a linear ramp across `span` pixels: pixel k of the span moves by
+  // d·(k+½)/span on the left and −d·(span−k−½)/span on the right, so the
+  // step d becomes d/span per pixel, the same as the gradient inside a block
+  const half = span / 2;
   // horizontal boundaries at x ≡ offsetX (mod period), between x-1 and x
   for (let y = 0; y < h; y++) {
     const row = y * w;
     for (let xb = grid.offsetX; xb < w; xb += period) {
-      if (xb < 2 || xb + 1 >= w) continue;
+      if (xb < half || xb + half - 1 >= w) continue;
       const a0 = work[row + xb - 2];
       const a1 = work[row + xb - 1];
       const b0 = work[row + xb];
@@ -110,16 +121,17 @@ export function deblockDelta(p: Plane, grid: BlockGrid, opts: DeblockOptions = {
       if (ad > maxStep || ad < 1e-6) continue;
       const act = 0.5 * (Math.abs(a1 - a0) + Math.abs(b1 - b0));
       if (ad < ratio * act + 1e-4) continue;
-      for (let k = 0; k < 4; k++) {
-        const i = row + xb - 2 + k;
-        work[i] += d * taps[k];
-        delta.data[i] += d * taps[k];
+      for (let k = 0; k < span; k++) {
+        const i = row + xb - half + k;
+        const t = k < half ? d * ((k + 0.5) / span) : -d * ((span - k - 0.5) / span);
+        work[i] += t;
+        delta.data[i] += t;
       }
     }
   }
   for (let x = 0; x < w; x++) {
     for (let yb = grid.offsetY; yb < h; yb += period) {
-      if (yb < 2 || yb + 1 >= h) continue;
+      if (yb < half || yb + half - 1 >= h) continue;
       const a0 = work[(yb - 2) * w + x];
       const a1 = work[(yb - 1) * w + x];
       const b0 = work[yb * w + x];
@@ -129,10 +141,11 @@ export function deblockDelta(p: Plane, grid: BlockGrid, opts: DeblockOptions = {
       if (ad > maxStep || ad < 1e-6) continue;
       const act = 0.5 * (Math.abs(a1 - a0) + Math.abs(b1 - b0));
       if (ad < ratio * act + 1e-4) continue;
-      for (let k = 0; k < 4; k++) {
-        const i = (yb - 2 + k) * w + x;
-        work[i] += d * taps[k];
-        delta.data[i] += d * taps[k];
+      for (let k = 0; k < span; k++) {
+        const i = (yb - half + k) * w + x;
+        const t = k < half ? d * ((k + 0.5) / span) : -d * ((span - k - 0.5) / span);
+        work[i] += t;
+        delta.data[i] += t;
       }
     }
   }

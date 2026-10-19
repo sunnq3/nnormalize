@@ -519,11 +519,21 @@ export class Engine {
     );
     const reasons: string[] = [];
     if (residual.length)
-      reasons.push(`${residual.length} periodic component${residual.length > 1 ? 's' : ''} still above ${budget.maxPeakDb} dB and ${budget.minPeakLevels} levels`);
+      reasons.push(
+        `${residual.length} repeating pattern${residual.length > 1 ? 's are' : ' is'} still visible in the saved file (${residual
+          .map((f) => (f.kind === 'periodic' ? `every ${f.details.period.toFixed(1)} px, ${(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255).toFixed(1)} levels` : ''))
+          .join('; ')})`,
+      );
     const bs = Math.max(a.blockGrid.strengthX, a.blockGrid.strengthY);
-    if (a.blockGrid.detected && bs > budget.maxBlockStrength) reasons.push(`block grid at ${(bs * 100).toFixed(0)} % exceeds ${(budget.maxBlockStrength * 100).toFixed(0)} %`);
+    const bstep = a.blockGrid.stepLevels;
+    // a grid only counts when it is both relatively and absolutely there: a
+    // 0.2-level step is a measurement, not something anyone can see
+    const gridVisible = a.blockGrid.detected && bs > budget.maxBlockStrength && bstep >= 0.5;
+    if (gridVisible) reasons.push(`block edges are still visible: steps of ${bstep.toFixed(1)} levels, ${(bs * 100).toFixed(0)} % above the texture`);
     if (encodePsnr < budget.minEncodePsnr)
-      reasons.push(`encode error ${encodePsnr.toFixed(1)} dB is below ${budget.minEncodePsnr} dB (the encoder discarded fine grain or detail); raise quality to keep more`);
+      reasons.push(
+        `saving changed pixels by ${encodeRmsLevels.toFixed(1)} levels on average, more than the ${(255 / Math.pow(10, budget.minEncodePsnr / 20)).toFixed(1)} allowed: the JPEG dropped fine grain or detail; raise the quality to keep more`,
+      );
     // Fixes the output analysis can see that the source analysis could not:
     // a block grid hidden under strong interference, or a periodic component
     // the source thresholds missed.
@@ -531,13 +541,13 @@ export class Engine {
     const src = this.analysis!;
     const gridAlready = src.findings.some((f) => f.kind === 'jpeg-grid');
     const outGrid = a.findings.find((f) => f.kind === 'jpeg-grid');
-    if (outGrid && !gridAlready && bs > budget.maxBlockStrength) suggested.push({ ...outGrid, id: 'jpeg-grid', note: 'Found on the exported file; it was hidden under the interference in the source analysis.' });
+    if (outGrid && !gridAlready && gridVisible) suggested.push({ ...outGrid, id: 'jpeg-grid', note: 'Seen in the saved file; it was hidden under the patterns when the photo was first checked.' });
     for (const f of residual) {
       const tol = 2 / a.spectrum.size;
       const known = src.findings.some(
         (g) => g.kind === 'periodic' && f.kind === 'periodic' && ((Math.abs(g.details.u - f.details.u) < tol && Math.abs(g.details.v - f.details.v) < tol) || (Math.abs(g.details.u + f.details.u) < tol && Math.abs(g.details.v + f.details.v) < tol)),
       );
-      if (!known) suggested.push({ ...f, id: `verify-${suggested.length}`, note: 'Found on the exported file, not in the source analysis.' });
+      if (!known) suggested.push({ ...f, id: `verify-${suggested.length}`, note: 'Seen in the saved file, not when the photo was first checked.' });
     }
     return {
       suggested,
@@ -548,7 +558,7 @@ export class Engine {
       chroma: info.subsampling,
       residual,
       residualPeriodic: residual.length,
-      blockGrid: { detected: a.blockGrid.detected, strength: bs },
+      blockGrid: { detected: a.blockGrid.detected, strength: bs, stepLevels: bstep },
       noise: { globalSigmaLevels: a.noise.globalSigma * 255, expectedLevels: (this.analysis?.noise.globalSigma ?? 0) * 255 },
       pass: reasons.length === 0,
       reasons,

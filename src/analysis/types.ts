@@ -46,8 +46,14 @@ export interface JpegGridDetails {
   offsetY: number;
   strengthX: number;
   strengthY: number;
+  /** mean boundary step above the texture, 0..1 plane units (×255 for levels) */
+  stepLevels: number;
   sourceQuality: number | null;
   sourceSubsampling: string | null;
+  /** deblocker tuning: steps up to this size (0..1) are treated as block edges, if they exceed activityRatio × local texture */
+  maxStep: number;
+  activityRatio: number;
+  span: 4 | 8;
 }
 
 export interface NoiseDetails {
@@ -62,6 +68,8 @@ export interface NoiseDetails {
   curve: Float32Array; // sigma vs intensity bin
   highBandDb: number; // spectral tilt of the noise floor: ~0 white, negative = previously smoothed, positive = sharpened
   spectralSigma: number; // sigma implied by the spectrum's floor
+  /** how much of the photo's own noise to remove everywhere: 0 only levels it, 0.6 removes 60 % */
+  reduction: number;
 }
 
 export interface HotPixelDetails {
@@ -129,7 +137,31 @@ export interface AnalysisOptions {
   minAmplitudeLevels: number; // default 0.5
   /** verification mode: fewer tiles, no presence maps, no hot-pixel search */
   quick: boolean;
+  /** how far to go: gentle only touches what is clearly wrong, maximum smooths grain and block edges everywhere */
+  level: CleanupLevel;
 }
+
+export type CleanupLevel = 'gentle' | 'standard' | 'strong' | 'maximum';
+
+export interface LevelProfile {
+  zThreshold: number;
+  minAmplitudeLevels: number;
+  noiseThresholdDb: number;
+  noiseReduction: number; // 0..1
+  noiseAlwaysOn: boolean;
+  deblockMaxStep: number;
+  deblockActivityRatio: number;
+  deblockSpan: 4 | 8;
+  deblockAlwaysOn: boolean;
+  enableWeakPeaks: boolean;
+}
+
+export const LEVELS: Record<CleanupLevel, LevelProfile> = {
+  gentle: { zThreshold: 7, minAmplitudeLevels: 1, noiseThresholdDb: 4, noiseReduction: 0, noiseAlwaysOn: false, deblockMaxStep: 0.06, deblockActivityRatio: 1.8, deblockSpan: 4, deblockAlwaysOn: false, enableWeakPeaks: false },
+  standard: { zThreshold: 6, minAmplitudeLevels: 0.5, noiseThresholdDb: 3, noiseReduction: 0, noiseAlwaysOn: false, deblockMaxStep: 0.08, deblockActivityRatio: 1.5, deblockSpan: 4, deblockAlwaysOn: false, enableWeakPeaks: false },
+  strong: { zThreshold: 5, minAmplitudeLevels: 0.3, noiseThresholdDb: 2, noiseReduction: 0.5, noiseAlwaysOn: true, deblockMaxStep: 0.15, deblockActivityRatio: 1.2, deblockSpan: 8, deblockAlwaysOn: true, enableWeakPeaks: true },
+  maximum: { zThreshold: 4.5, minAmplitudeLevels: 0.2, noiseThresholdDb: 1.5, noiseReduction: 0.8, noiseAlwaysOn: true, deblockMaxStep: 0.25, deblockActivityRatio: 1.0, deblockSpan: 8, deblockAlwaysOn: true, enableWeakPeaks: true },
+};
 
 export const defaultAnalysisOptions: AnalysisOptions = {
   zThreshold: 6,
@@ -142,6 +174,7 @@ export const defaultAnalysisOptions: AnalysisOptions = {
   linearLight: false,
   minAmplitudeLevels: 0.5,
   quick: false,
+  level: 'standard',
 };
 
 export interface Analysis {

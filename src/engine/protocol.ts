@@ -55,7 +55,7 @@ export interface RoundTripReport {
   /** findings re-detected on the decoded output */
   residual: Finding[];
   residualPeriodic: number;
-  blockGrid: { detected: boolean; strength: number };
+  blockGrid: { detected: boolean; strength: number; stepLevels: number };
   noise: { globalSigmaLevels: number; expectedLevels: number };
   /** fixes the verification suggests adding, e.g. a block grid the source analysis could not see under the interference */
   suggested: Finding[];

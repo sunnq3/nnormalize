@@ -222,6 +222,8 @@ export function guidedFilter(p: Plane, r: number, eps: number): Plane {
 export interface NoiseNormaliseOptions {
   thresholdDb?: number; // only act outside ±threshold (default 1.5)
   radius?: number; // guided filter radius (default 2)
+  /** target = expected sigma × targetScale; 1 levels the noise, 0.3 reduces it to 30 % everywhere (default 1) */
+  targetScale?: number;
 }
 
 /**
@@ -234,11 +236,12 @@ export interface NoiseNormaliseOptions {
 export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: NoiseNormaliseOptions = {}): { delta: Plane; blend: Plane } {
   const thr = opts.thresholdDb ?? 1.5;
   const r = opts.radius ?? 2;
+  const scale = opts.targetScale ?? 1;
   const nBlocks = map.sigma.length;
   const need = new Uint8Array(nBlocks);
   let any = false;
   for (let i = 0; i < nBlocks; i++) {
-    const e = Math.max(1e-6, expectedSigma(model, map.mean[i]));
+    const e = Math.max(1e-6, expectedSigma(model, map.mean[i]) * scale);
     if (20 * Math.log10(Math.max(1e-6, map.sigma[i]) / e) > thr) {
       need[i] = 1;
       any = true;
@@ -253,6 +256,8 @@ export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: N
     { r, eps: (2 * g) ** 2 + 1e-8 },
     { r: r + 1, eps: (6 * g) ** 2 + 1e-8 },
     { r: r + 2, eps: (14 * g) ** 2 + 1e-8 },
+    { r: r + 3, eps: (30 * g) ** 2 + 1e-8 },
+    { r: r + 5, eps: (60 * g) ** 2 + 1e-8 },
   ];
   const remaining = new Uint8Array(need);
   for (let ci = 0; ci < candidates.length; ci++) {
@@ -266,7 +271,7 @@ export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: N
     const last = ci === candidates.length - 1;
     for (let i = 0; i < nBlocks; i++) {
       if (!remaining[i]) continue;
-      const e = Math.max(1e-6, expectedSigma(model, map.mean[i]));
+      const e = Math.max(1e-6, expectedSigma(model, map.mean[i]) * scale);
       const s0 = map.sigma[i];
       const sf = fmap.sigma[i];
       if (sf <= e || last) {

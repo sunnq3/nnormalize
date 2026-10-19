@@ -16,9 +16,9 @@ export interface HotPixel {
 
 export interface HotPixelOptions {
   k?: number; // multiple of local sigma (default 10)
-  minAbs?: number; // absolute floor on the deviation, plane units (default 0.06 ≈ 15 levels)
-  neighbourK?: number; // must differ from every neighbour by this multiple of sigma (default 5)
-  minNeighbourDiff?: number; // and by at least this much, plane units (default 0.03 ≈ 8 levels)
+  minAbs?: number; // absolute floor on the deviation, plane units (default 0.12 ≈ 30 levels)
+  neighbourK?: number; // must differ from every neighbour by this multiple of sigma (default 6)
+  minNeighbourDiff?: number; // and by at least this much, plane units (default 0.06 ≈ 15 levels)
   /** the eight neighbours must agree with each other: their range may be at most this fraction of the deviation (default 0.6) */
   neighbourRange?: number;
   max?: number; // cap on the number returned (default 20000)
@@ -53,9 +53,9 @@ export { median9 };
 
 export function findHotPixels(p: Plane, model: NoiseModel, opts: HotPixelOptions = {}): { pixels: HotPixel[]; delta: Plane } {
   const k = opts.k ?? 10;
-  const minAbs = opts.minAbs ?? 0.06;
-  const nk = opts.neighbourK ?? 5;
-  const minNd = opts.minNeighbourDiff ?? 0.03;
+  const minAbs = opts.minAbs ?? 0.12;
+  const nk = opts.neighbourK ?? 6;
+  const minNd = opts.minNeighbourDiff ?? 0.06;
   const rangeFrac = opts.neighbourRange ?? 0.6;
   const cap = opts.max ?? 20000;
   const { w, h } = p;

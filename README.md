@@ -33,7 +33,11 @@ The hosted copy is built and deployed by the workflow in `.github/workflows/page
 
 Drop a photo, or load the test image, which plants three known patterns, an 8×8 grid and a dozen hot pixels so you can see what the numbers look like when the answer is known.
 
-- **Views:** original, result, difference (what changed, amplified by the gain slider), mask. Split compares before and after. Fit, 100 % and 200 % zoom; double-click toggles fit and 100 %.
+- **Clean-up level** (top bar) decides how far it goes. *Gentle* and *Standard* fix only what is clearly wrong and leave the grain alone, so a photo without visible problems comes out nearly unchanged. *Strong* and *Maximum* also remove grain everywhere (50 % / 80 %) and blend block edges over the whole block, which is what produces a difference you can see after the photo is compressed again by someone else's app.
+- **"Levels"** throughout are brightness steps out of 255: 10 is obvious, 1 is faint, 0.3 is invisible. Findings under 1 level are listed but left unticked.
+
+- **Views:** before, after, what changed (amplified by the slider). Split compares before and after. Fit, 100 % and 200 % zoom; double-click toggles fit and 100 %.
+- **Brush:** with a problem selected, paint on the picture where its fix should be held back; amber shows where. "Only where it was found" and the brightness range seed the mask automatically.
 - **Spectrum:** hover for exact frequency, period, angle, lines per inch when the DPI is known, and dB over background. Click a ring to select that finding; "Add a peak by clicking" turns a click into a new finding measured like the rest.
 - **Selected fix:** strength, method, brush tools, "Where it was found" to seed the mask from the per-tile presence, a brightness range mask.
 - **Analysis:** presets for scans, screens, old phone JPEGs and film; the thresholds behind them; linear-light analysis; re-analyse.

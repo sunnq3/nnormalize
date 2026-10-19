@@ -46,7 +46,7 @@ export class Viewer {
 
   // mask painting
   maskMode = false;
-  brush: MaskBrush = { size: 120, hardness: 0.5, flow: 1, erase: false };
+  brush: MaskBrush = { size: 160, hardness: 0.4, flow: 1, erase: true };
   mask: { w: number; h: number; data: Uint8Array } | null = null;
   private painting = false;
   private lastPaint: { x: number; y: number } | null = null;
@@ -160,7 +160,7 @@ export class Viewer {
   }
 
   private needsCrop(): boolean {
-    return this.zoom > this.previewScale + 1e-6 && this.mode !== 'mask';
+    return this.zoom > this.previewScale + 1e-6;
   }
 
   private scheduleCrop(force = false): void {
@@ -205,10 +205,7 @@ export class Viewer {
       if (!bmp) return;
       ctx.drawImage(bmp, this.panX, this.panY, this.imageW * this.zoom, this.imageH * this.zoom);
     };
-    if (this.mode === 'mask') {
-      drawBitmap(this.previewOriginal ?? this.preview);
-      this.drawMaskOverlay();
-    } else if (this.split && this.previewOriginal && this.mode !== 'difference') {
+    if (this.split && this.previewOriginal && this.mode !== 'difference' && !this.maskMode) {
       const half = r.width / 2;
       ctx.save();
       ctx.beginPath();
@@ -239,19 +236,21 @@ export class Viewer {
     } else {
       drawBitmap(this.preview, this.crop);
     }
+    if (this.maskMode) this.drawMaskOverlay();
   }
 
+  /** Tint where the selected fix is held back (mask below full), so an untouched mask shows nothing. */
   private drawMaskOverlay(): void {
     if (!this.mask) return;
     const ctx = this.ctx;
     const { w, h, data } = this.mask;
     const img = new ImageData(w, h);
     for (let i = 0; i < w * h; i++) {
-      const m = data[i];
+      const held = 255 - data[i];
       img.data[i * 4] = 240;
       img.data[i * 4 + 1] = 180;
       img.data[i * 4 + 2] = 69;
-      img.data[i * 4 + 3] = Math.round(m * 0.55);
+      img.data[i * 4 + 3] = Math.round(held * 0.6);
     }
     const tmp = document.createElement('canvas');
     tmp.width = w;
@@ -273,7 +272,7 @@ export class Viewer {
   private pointerDown(e: PointerEvent): void {
     if (!this.imageW) return;
     this.el.setPointerCapture(e.pointerId);
-    if (this.maskMode && this.mode === 'mask' && this.mask && e.button === 0 && !e.altKey) {
+    if (this.maskMode && this.mask && e.button === 0 && !e.altKey) {
       this.painting = true;
       const p = this.toImage(e);
       this.lastPaint = p;
@@ -298,7 +297,7 @@ export class Viewer {
       this.draw();
       return;
     }
-    if (this.maskMode && this.mode === 'mask') {
+    if (this.maskMode) {
       this.lastPaint = p;
       this.draw();
     }
@@ -329,7 +328,7 @@ export class Viewer {
   private wheel(e: WheelEvent): void {
     if (!this.imageW) return;
     e.preventDefault();
-    if (this.maskMode && this.mode === 'mask' && e.shiftKey) {
+    if (this.maskMode && e.shiftKey) {
       this.brush.size = Math.max(4, Math.min(2000, this.brush.size * (e.deltaY > 0 ? 0.9 : 1.1)));
       this.draw();
       return;

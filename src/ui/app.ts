@@ -3,7 +3,7 @@
  * panel, the findings list, the detail panel and the export panel.
  */
 
-import type { Analysis, AnalysisOptions, Finding, PeriodicMethod } from '../analysis/types';
+import type { Analysis, AnalysisOptions, CleanupLevel, Finding, PeriodicMethod } from '../analysis/types';
 import { EngineClient } from '../engine/client';
 import { defaultBudget, type Budget, type LayerSetting, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
 import { defaultExportOptions, type JpegExportOptions } from '../io/encode';
@@ -12,6 +12,7 @@ import { SpectrumPanel } from './spectrum';
 import { Viewer } from './viewer';
 import { el, fmt } from './dom';
 import { PRESETS } from './presets';
+import { LEVEL_WORDS, plainDescription, plainFix, plainLabel } from './words';
 
 interface RecipeFile {
   tool: string;
@@ -49,11 +50,12 @@ export class App {
   private selected: string | null = null;
   private exportOptions: JpegExportOptions = { ...defaultExportOptions };
   private budget: Budget = { ...defaultBudget };
-  private analysisOptions: Partial<AnalysisOptions> = {};
+  private analysisOptions: Partial<AnalysisOptions> = { level: 'standard' };
   private report: RoundTripReport | null = null;
   private jpegUrl: string | null = null;
   private busy = false;
   private presetId = 'default';
+  private level: CleanupLevel = 'standard';
   private recipe: RecipeFile | null = null;
   private batchQueue: File[] = [];
   private renderQueued = false;
@@ -77,6 +79,8 @@ export class App {
   private modeButtons = new Map<ViewMode, HTMLButtonElement>();
   private zoomButtons = new Map<string, HTMLButtonElement>();
   private splitBtn!: HTMLButtonElement;
+  private brushBtn!: HTMLButtonElement;
+  private levelSelect!: HTMLSelectElement;
   private masterRange!: HTMLInputElement;
   private masterVal!: HTMLElement;
   private diffRange!: HTMLLabelElement;
@@ -102,14 +106,22 @@ export class App {
     });
     this.status = el('div', { class: 'status' }, 'Open a photo to begin.');
     this.progressBar = el('div');
-    this.exportBtn = el('button', { class: 'primary', disabled: '' }, 'Export JPEG') as HTMLButtonElement;
+    this.exportBtn = el('button', { class: 'primary', disabled: '' }, 'Save JPEG') as HTMLButtonElement;
     this.exportBtn.addEventListener('click', () => void this.doExport());
+    this.levelSelect = el('select', { title: 'How far the clean-up goes' }) as HTMLSelectElement;
+    for (const k of ['gentle', 'standard', 'strong', 'maximum'] as CleanupLevel[]) {
+      const o = el('option', { value: k }, LEVEL_WORDS[k].label) as HTMLOptionElement;
+      if (k === this.level) o.selected = true;
+      this.levelSelect.appendChild(o);
+    }
+    this.levelSelect.addEventListener('change', () => void this.setLevel(this.levelSelect.value as CleanupLevel));
     const top = el(
       'div',
       { class: 'top' },
       el('span', { class: 'brand' }, 'nnormalize'),
       el('button', { onclick: () => this.fileInput.click() }, 'Open photo'),
       el('button', { onclick: () => void this.loadTest() }, 'Test image'),
+      el('label', { class: 'level' }, 'Clean-up ', this.levelSelect),
       this.fileInput,
       this.status,
       el('div', { class: 'progress' }, this.progressBar),
@@ -121,16 +133,15 @@ export class App {
     this.viewer = new Viewer({
       requestCrop: (x0, y0, w, h) => this.client.render({ region: { kind: 'crop', x0, y0, w, h }, ...this.renderArgs() }),
       requestPreview: () => this.client.render({ region: { kind: 'preview' }, ...this.renderArgs() }),
-      maskChanged: () => void this.pushMask(),
+      maskChanged: () => void this.pushMask().then(() => this.queueRender()),
       onHud: (t) => (this.hud.textContent = t),
     });
     this.hud = this.viewer.el.querySelector('.hud') as HTMLElement;
     const modeGroup = el('div', { class: 'group' });
     for (const [mode, label] of [
-      ['original', 'Original'],
-      ['result', 'Result'],
-      ['difference', 'Difference'],
-      ['mask', 'Mask'],
+      ['original', 'Before'],
+      ['result', 'After'],
+      ['difference', 'What changed'],
     ] as [ViewMode, string][]) {
       const b = el('button', { onclick: () => this.setMode(mode) }, label) as HTMLButtonElement;
       this.modeButtons.set(mode, b);
@@ -146,8 +157,9 @@ export class App {
       this.zoomButtons.set(z, b);
       zoomGroup.appendChild(b);
     }
-    this.splitBtn = el('button', { onclick: () => this.toggleSplit() }, 'Split') as HTMLButtonElement;
-    this.masterRange = el('input', { type: 'range', min: '0', max: '150', value: '100' }) as HTMLInputElement;
+    this.splitBtn = el('button', { onclick: () => this.toggleSplit(), title: 'Before on the left, after on the right' }, 'Split') as HTMLButtonElement;
+    this.brushBtn = el('button', { onclick: () => this.toggleBrush(), title: 'Paint where the selected fix should be held back' }, 'Brush') as HTMLButtonElement;
+    this.masterRange = el('input', { type: 'range', min: '0', max: '200', value: '100' }) as HTMLInputElement;
     this.masterVal = el('span', { class: 'val' }, '100 %');
     this.masterRange.addEventListener('input', () => {
       this.master = Number(this.masterRange.value) / 100;
@@ -159,15 +171,16 @@ export class App {
       this.diffGain = Number(diffInput.value);
       this.queueRender();
     });
-    this.diffRange = el('label', { style: 'display:none' }, 'Gain ', diffInput) as HTMLLabelElement;
+    this.diffRange = el('label', { style: 'display:none', title: 'How much the change is amplified in this view' }, 'Amplify ', diffInput) as HTMLLabelElement;
     const toolbar = el(
       'div',
       { class: 'toolbar' },
       modeGroup,
       this.splitBtn,
+      this.brushBtn,
       this.diffRange,
       el('span', { class: 'spacer' }),
-      el('label', {}, 'All fixes ', this.masterRange, this.masterVal),
+      el('label', { title: 'Scales every fix at once; 100 % is exactly what was measured' }, 'All fixes ', this.masterRange, this.masterVal),
       zoomGroup,
     );
     const view = el('div', { class: 'view' }, toolbar, this.viewer.el);
@@ -201,12 +214,13 @@ export class App {
       if (files.length) void this.runBatch(files);
       this.batchInput.value = '';
     });
+    const readoutIdle = 'Move over the picture for the exact numbers at that spot; click a ring to select that pattern.';
     this.spectrum = new SpectrumPanel({
-      onHover: (t) => (this.readout.innerHTML = t || 'Hover the spectrum for exact frequency and level; click a ring to select it.'),
+      onHover: (t) => (this.readout.innerHTML = t || readoutIdle),
       onClick: (u, v) => void this.addPeak(u, v),
       onSelect: (id) => this.select(id),
     });
-    this.readout = el('div', { class: 'readout' }, 'Hover the spectrum for exact frequency and level; click a ring to select it.');
+    this.readout = el('div', { class: 'readout' }, readoutIdle);
     const addBtn = el(
       'button',
       {
@@ -216,7 +230,18 @@ export class App {
           addBtn.classList.toggle('on', this.spectrum.addMode);
         },
       },
-      'Add a peak by clicking',
+      'Add a pattern by clicking',
+    );
+    const help = el('details', { class: 'help' }, el('summary', {}, 'How to read this'));
+    help.appendChild(
+      el(
+        'div',
+        {},
+        el('p', {}, 'Open a photo. The tool looks for things that repeat (stripes, moiré, dot screens), the block grid left by earlier JPEG saves, uneven grain, and dead pixels. Each one becomes a line under “Problems found”; ticked lines get fixed.'),
+        el('p', {}, '“Levels” are brightness steps out of 255. A pattern 10 levels strong is obvious; 1 level is faint; 0.3 is invisible.'),
+        el('p', {}, 'The Clean-up setting at the top decides how far to go. Standard fixes what it finds without softening the photo. Strong and Maximum also remove grain and block edges everywhere, which is what makes a difference you can see after the photo is compressed again.'),
+        el('p', {}, 'Brush holds a fix back where you paint. Save JPEG writes the file, then reopens it and checks what survived.'),
+      ),
     );
     this.findingsEl = el('div', { class: 'findings' });
     this.detailEl = el('div', { class: 'detail' });
@@ -224,12 +249,21 @@ export class App {
     const side = el(
       'div',
       { class: 'side' },
-      el('section', {}, el('h2', {}, 'Source'), this.sourceEl),
-      el('section', {}, el('h2', {}, 'Analysis'), this.analysisEl, this.recipeInput, this.batchInput),
-      el('section', {}, el('h2', {}, 'Spectrum', el('span', { class: 'sub' }, 'averaged over tiles')), this.spectrum.el, this.readout, el('div', { class: 'tools', style: 'margin-top:6px' }, addBtn)),
-      el('section', {}, el('h2', {}, 'Findings'), this.findingsEl),
+      el('section', {}, help),
+      el('section', {}, el('h2', {}, 'Problems found'), el('div', { class: 'intro' }, 'Ticked lines will be fixed. Click a line to adjust its fix.'), this.findingsEl),
       el('section', {}, el('h2', {}, 'Selected fix'), this.detailEl),
-      el('section', {}, el('h2', {}, 'Export'), this.exportEl),
+      el('section', {}, el('h2', {}, 'Save'), this.exportEl),
+      el(
+        'section',
+        {},
+        el('h2', {}, 'What repeats', el('span', { class: 'sub' }, 'the spectrum')),
+        el('div', { class: 'intro' }, 'Bright dots away from the centre are stripes or grids in the photo; the further out, the finer. Rings mark the ones found.'),
+        this.spectrum.el,
+        this.readout,
+        el('div', { class: 'tools', style: 'margin-top:6px' }, addBtn),
+      ),
+      el('section', {}, el('h2', {}, 'Photo'), this.sourceEl),
+      el('section', {}, el('h2', {}, 'Settings'), this.analysisEl, this.recipeInput, this.batchInput),
     );
 
     r.append(top, view, side);
@@ -245,6 +279,7 @@ export class App {
   private renderAnalysisPanel(): void {
     const box = this.analysisEl;
     box.innerHTML = '';
+    box.appendChild(el('div', { class: 'intro' }, `Clean-up is ${LEVEL_WORDS[this.level].label.toLowerCase()}: ${LEVEL_WORDS[this.level].hint}`));
     const sel = el('select') as HTMLSelectElement;
     for (const p of PRESETS) {
       const o = el('option', { value: p.id }, p.label) as HTMLOptionElement;
@@ -254,28 +289,14 @@ export class App {
     const hint = el('div', { style: 'color:var(--ink-faint);margin:2px 0 6px' }, PRESETS.find((p) => p.id === this.presetId)?.hint ?? '');
     sel.addEventListener('change', () => {
       this.presetId = sel.value;
-      this.analysisOptions = { ...(PRESETS.find((p) => p.id === this.presetId)?.options ?? {}) };
+      this.analysisOptions = { ...(PRESETS.find((p) => p.id === this.presetId)?.options ?? {}), level: this.level };
       this.renderAnalysisPanel();
     });
-    box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Preset'), sel));
+    box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Photo type'), sel));
     box.appendChild(hint);
-    const o = this.analysisOptions;
-    const z = el('input', { type: 'number', min: '3', max: '20', step: '0.5', value: String(o.zThreshold ?? 6) }) as HTMLInputElement;
-    z.addEventListener('change', () => (this.analysisOptions.zThreshold = Number(z.value)));
-    const amp = el('input', { type: 'number', min: '0.05', max: '20', step: '0.05', value: String(o.minAmplitudeLevels ?? 0.5) }) as HTMLInputElement;
-    amp.addEventListener('change', () => (this.analysisOptions.minAmplitudeLevels = Number(amp.value)));
-    const nz = el('input', { type: 'number', min: '1', max: '12', step: '0.5', value: String(o.noiseThresholdDb ?? 3) }) as HTMLInputElement;
-    nz.addEventListener('change', () => (this.analysisOptions.noiseThresholdDb = Number(nz.value)));
-    const lin = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    lin.checked = !!o.linearLight;
-    lin.addEventListener('change', () => (this.analysisOptions.linearLight = lin.checked));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Peak threshold'), el('span', {}, z, ' z'), el('span')));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Visible from'), el('span', {}, amp, ' levels'), el('span')));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Noise uneven if'), el('span', {}, '± ', nz, ' dB'), el('span')));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Linear light'), el('label', {}, lin, ' analyse after sRGB decode'), el('span')));
     const tools = el('div', { class: 'tools' });
-    tools.appendChild(el('button', { onclick: () => void this.reanalyse(), disabled: this.info ? undefined : '' }, 'Re-analyse'));
-    tools.appendChild(el('button', { onclick: () => this.recipeInput.click() }, this.recipe ? `Recipe: ${this.recipe.name}` : 'Load recipe'));
+    tools.appendChild(el('button', { onclick: () => void this.reanalyse(), disabled: this.info ? undefined : '' }, 'Look again'));
+    tools.appendChild(el('button', { onclick: () => this.recipeInput.click() }, this.recipe ? `Settings file: ${this.recipe.name}` : 'Load settings file'));
     if (this.recipe)
       tools.appendChild(
         el(
@@ -287,18 +308,38 @@ export class App {
               this.renderAnalysisPanel();
             },
           },
-          'Forget recipe',
+          'Forget it',
         ),
       );
-    tools.appendChild(el('button', { onclick: () => this.batchInput.click() }, 'Batch: pick photos'));
+    tools.appendChild(el('button', { onclick: () => this.batchInput.click() }, 'Do many photos'));
     box.appendChild(tools);
-    box.appendChild(
-      el(
-        'div',
-        { style: 'color:var(--ink-faint);margin-top:6px' },
-        'Batch runs every chosen photo through analysis, the loaded recipe (or the defaults), export and verification, and downloads each result with its report.',
-      ),
-    );
+    box.appendChild(el('div', { style: 'color:var(--ink-faint);margin-top:6px' }, '“Do many photos” runs each one through the same settings, saves it and checks it, and downloads a summary.'));
+
+    const adv = el('details', { class: 'advanced' }, el('summary', {}, 'Thresholds'));
+    const o = this.analysisOptions;
+    const z = el('input', { type: 'number', min: '3', max: '20', step: '0.5', value: String(o.zThreshold ?? '') , placeholder: 'auto' }) as HTMLInputElement;
+    z.addEventListener('change', () => (this.analysisOptions.zThreshold = z.value ? Number(z.value) : undefined));
+    const amp = el('input', { type: 'number', min: '0.05', max: '20', step: '0.05', value: String(o.minAmplitudeLevels ?? ''), placeholder: 'auto' }) as HTMLInputElement;
+    amp.addEventListener('change', () => (this.analysisOptions.minAmplitudeLevels = amp.value ? Number(amp.value) : undefined));
+    const nz = el('input', { type: 'number', min: '1', max: '12', step: '0.5', value: String(o.noiseThresholdDb ?? ''), placeholder: 'auto' }) as HTMLInputElement;
+    nz.addEventListener('change', () => (this.analysisOptions.noiseThresholdDb = nz.value ? Number(nz.value) : undefined));
+    const lin = el('input', { type: 'checkbox' }) as HTMLInputElement;
+    lin.checked = !!o.linearLight;
+    lin.addEventListener('change', () => (this.analysisOptions.linearLight = lin.checked));
+    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Pattern must stand out by'), el('span', {}, z, ' × the usual spread'), el('span')));
+    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Count it as visible from'), el('span', {}, amp, ' levels'), el('span')));
+    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Grain counts as uneven from'), el('span', {}, '± ', nz, ' dB'), el('span')));
+    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Linear light'), el('label', {}, lin, ' measure after undoing the gamma curve'), el('span')));
+    adv.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'Blank means the clean-up level decides. Press “Look again” after changing these.'));
+    box.appendChild(adv);
+  }
+
+  private async setLevel(level: CleanupLevel): Promise<void> {
+    this.level = level;
+    this.analysisOptions = { ...this.analysisOptions, level };
+    this.setStatus(`Clean-up set to ${LEVEL_WORDS[level].label.toLowerCase()}: ${LEVEL_WORDS[level].hint}`);
+    this.renderAnalysisPanel();
+    if (this.info && !this.busy) await this.reanalyse();
   }
 
   private async reanalyse(): Promise<void> {
@@ -346,13 +387,25 @@ export class App {
 
   private setMode(mode: ViewMode): void {
     this.viewer.mode = mode;
-    this.viewer.maskMode = mode === 'mask';
     for (const [m, b] of this.modeButtons) b.classList.toggle('on', m === mode);
     this.diffRange.style.display = mode === 'difference' ? '' : 'none';
-    if (mode === 'mask') {
+    this.queueRender();
+  }
+
+  private toggleBrush(on?: boolean): void {
+    const next = on ?? !this.viewer.maskMode;
+    if (next && !this.selected) {
+      this.setStatus('Pick a problem in the list first, then paint where its fix should be held back.');
+      return;
+    }
+    this.viewer.maskMode = next;
+    this.brushBtn.classList.toggle('on', next);
+    if (next) {
       this.ensureLocalMask();
-      this.viewer.draw();
-    } else this.queueRender();
+      if (this.viewer.mode !== 'result') this.setMode('result');
+    }
+    this.viewer.draw();
+    this.renderDetail();
   }
 
   private setZoom(z: string): void {
@@ -371,7 +424,7 @@ export class App {
     if (this.busy) return;
     this.busy = true;
     try {
-      this.setStatus(`Decoding ${file.name}…`, null);
+      this.setStatus(`Opening ${file.name}…`, null);
       const info = await this.client.load(file);
       await this.afterLoad(info);
     } catch (e) {
@@ -432,8 +485,9 @@ export class App {
   private async runAnalysis(): Promise<void> {
     if (!this.info) return;
     const t0 = performance.now();
-    this.setStatus('Analysing…', 0);
-    const a = await this.client.analyze(this.analysisOptions, (stage, fr) => this.setStatus(`Analysing: ${stage}`, fr));
+    this.setStatus('Looking for problems…', 0);
+    const stageWords: Record<string, string> = { spectrum: 'what repeats', peaks: 'measuring patterns', noise: 'grain', hotpixels: 'dead pixels' };
+    const a = await this.client.analyze({ ...this.analysisOptions, level: this.level }, (stage, fr) => this.setStatus(`Looking for problems: ${stageWords[stage] ?? stage}`, fr));
     this.analysis = a;
     this.spectrum.setAnalysis(a, this.info.meta.dpi ?? null);
     this.renderFindings();
@@ -442,7 +496,12 @@ export class App {
     if (this.recipe) await this.applyRecipe(this.recipe, a);
     const first = a.findings.find((f) => f.enabled);
     this.select(first ? first.id : null);
-    this.setStatus(`Analysed in ${((performance.now() - t0) / 1000).toFixed(1)} s · ${a.findings.filter((f) => f.enabled).length} fix${a.findings.filter((f) => f.enabled).length === 1 ? '' : 'es'} suggested`);
+    const on = a.findings.filter((f) => f.enabled);
+    this.setStatus(
+      on.length
+        ? `Looked in ${((performance.now() - t0) / 1000).toFixed(1)} s: ${on.map((f) => plainLabel(f).toLowerCase()).join(', ')}. Computing the fixes…`
+        : `Looked in ${((performance.now() - t0) / 1000).toFixed(1)} s: nothing to fix at the ${LEVEL_WORDS[this.level].label.toLowerCase()} level. Raise Clean-up to also smooth grain and block edges.`,
+    );
     await this.buildPending();
     this.exportBtn.disabled = false;
   }
@@ -461,14 +520,14 @@ export class App {
   private async buildLayer(f: Finding): Promise<void> {
     this.layers.set(f.id, { built: false, building: true });
     this.renderFindings();
-    this.setStatus(`Computing ${f.label.toLowerCase()}…`, 0);
+    this.setStatus(`Computing: ${plainLabel(f).toLowerCase()}…`, 0);
     try {
-      const stats = await this.client.buildLayer(f, (_s, fr) => this.setStatus(`Computing ${f.label.toLowerCase()}…`, fr));
+      const stats = await this.client.buildLayer(f, (_s, fr) => this.setStatus(`Computing: ${plainLabel(f).toLowerCase()}…`, fr));
       this.layers.set(f.id, { built: true, building: false, rms: stats.rms });
-      this.setStatus(`${f.label}: ${fmt(stats.rms, 2)} levels rms changed, ${stats.ms} ms`);
+      this.setStatus(`${plainLabel(f)}: ready, changes the picture by ${fmt(stats.rms, 1)} levels on average`);
     } catch (e) {
       this.layers.set(f.id, { built: false, building: false });
-      this.setStatus(`${f.label} failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.setStatus(`${plainLabel(f)} failed: ${e instanceof Error ? e.message : String(e)}`);
     }
     this.renderFindings();
     this.renderDetail();
@@ -481,9 +540,12 @@ export class App {
     this.spectrum.setSelected(id);
     this.renderFindings();
     this.renderDetail();
-    if (this.viewer.mode === 'mask') {
-      this.ensureLocalMask();
-      this.viewer.draw();
+    if (this.viewer.maskMode) {
+      if (!id) this.toggleBrush(false);
+      else {
+        this.ensureLocalMask();
+        this.viewer.draw();
+      }
     }
   }
 
@@ -516,14 +578,17 @@ export class App {
     const box = this.findingsEl;
     box.innerHTML = '';
     if (!this.analysis) {
-      box.appendChild(el('div', { class: 'empty' }, this.info ? 'Analysing…' : 'Nothing analysed yet.'));
+      box.appendChild(el('div', { class: 'empty' }, this.info ? 'Looking…' : 'Open a photo and the problems it finds will be listed here.'));
       return;
     }
     if (!this.analysis.findings.length) {
-      box.appendChild(el('div', { class: 'empty' }, 'Nothing found above the thresholds.'));
+      box.appendChild(el('div', { class: 'empty' }, 'Nothing stands out at this clean-up level. Raise it to also smooth grain and block edges.'));
       return;
     }
-    for (const f of this.analysis.findings) {
+    const faint = (f: Finding): boolean => f.kind === 'periodic' && !f.enabled && Math.max(f.details.amplitude, f.details.amplitudeP90) * 255 < 1;
+    const main = this.analysis.findings.filter((f) => !faint(f) || f.id === this.selected);
+    const rest = this.analysis.findings.filter((f) => !main.includes(f));
+    const renderRow = (f: Finding): HTMLElement => {
       const st = this.layers.get(f.id);
       const cb = el('input', { type: 'checkbox' }) as HTMLInputElement;
       cb.checked = f.enabled;
@@ -536,12 +601,18 @@ export class App {
           onclick: () => this.select(f.id),
         },
         cb,
-        el('div', { class: 'title' }, f.label),
-        el('div', { class: 'sev', title: `severity ${fmt(f.severity * 100, 0)} %` }, el('div', { style: `width:${Math.round(f.severity * 100)}%` })),
-        el('div', { class: 'meta' }, f.description),
+        el('div', { class: 'title' }, plainLabel(f)),
+        el('div', { class: 'sev', title: `how bad: ${fmt(f.severity * 100, 0)} %` }, el('div', { style: `width:${Math.round(f.severity * 100)}%` })),
+        el('div', { class: 'meta' }, plainDescription(f)),
         f.note ? el('div', { class: 'note' }, f.note) : '',
       );
-      box.appendChild(row);
+      return row;
+    };
+    for (const f of main) box.appendChild(renderRow(f));
+    if (rest.length) {
+      const d = el('details', { class: 'advanced' }, el('summary', {}, `${rest.length} faint pattern${rest.length > 1 ? 's' : ''} under 1 level — not visible, left alone`));
+      for (const f of rest) d.appendChild(renderRow(f));
+      box.appendChild(d);
     }
   }
 
@@ -550,66 +621,67 @@ export class App {
     box.innerHTML = '';
     const f = this.analysis?.findings.find((x) => x.id === this.selected);
     if (!f) {
-      box.appendChild(el('div', { class: 'empty' }, 'Select a finding to adjust its fix.'));
+      box.appendChild(el('div', { class: 'empty' }, 'Click a problem in the list to adjust its fix.'));
       return;
     }
     const st = this.layers.get(f.id);
+    box.appendChild(el('div', { class: 'fixname' }, plainLabel(f)));
+    box.appendChild(el('div', { class: 'intro' }, plainFix(f)));
+
     // strength
-    const range = el('input', { type: 'range', min: '0', max: '150', value: String(Math.round(f.strength * 100)) }) as HTMLInputElement;
+    const range = el('input', { type: 'range', min: '0', max: '200', value: String(Math.round(f.strength * 100)) }) as HTMLInputElement;
     const val = el('span', { class: 'val' }, `${Math.round(f.strength * 100)} %`);
     range.addEventListener('input', () => {
       f.strength = Number(range.value) / 100;
       val.textContent = `${range.value} %`;
       this.queueRender();
     });
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Strength'), range, val));
+    box.appendChild(el('div', { class: 'row', title: '100 % is exactly what was measured; more over-corrects' }, el('span', {}, 'Strength'), range, val));
 
-    // facts
-    const facts = el('div', { class: 'facts' });
-    const fact = (k: string, v: string): void => {
-      facts.appendChild(el('span', {}, k));
-      facts.appendChild(el('b', {}, v));
-    };
-    if (f.kind === 'periodic') {
-      const d = f.details;
-      fact('frequency', `${fmt(d.u, 4)}, ${fmt(d.v, 4)} cyc/px`);
-      fact('period', `${fmt(d.period, 3)} px`);
-      fact('angle', `${fmt(d.angleDeg, 2)}°`);
-      if (d.lpi) fact('screen ruling', `${fmt(d.lpi, 1)} lpi`);
-      fact('amplitude', d.stationary ? `${fmt(d.amplitude * 255, 2)} levels` : `${fmt(d.amplitude * 255, 2)} typical, ${fmt(d.amplitudeP90 * 255, 2)} where strongest`);
-      fact('above background', `${fmt(d.excessDb, 1)} dB (z ${fmt(d.z, 1)})`);
-      fact('behaviour', d.stationary ? 'same everywhere' : 'varies across frame');
-      fact('phase coherence', fmt(d.coherence, 2));
-      fact('present in', `${fmt(f.extent * 100, 0)} % of tiles`);
-      if (d.harmonics.length) fact('harmonics', d.harmonics.map((h) => `${h.order}×`).join(' '));
-    } else if (f.kind === 'jpeg-grid') {
-      fact('grid offset', `${f.details.offsetX}, ${f.details.offsetY}`);
-      fact('boundary excess', `${fmt(f.details.strengthX * 100, 0)} % / ${fmt(f.details.strengthY * 100, 0)} %`);
-      if (f.details.sourceQuality) fact('source quality', `≈ ${fmt(f.details.sourceQuality, 0)}`);
-      if (f.details.sourceSubsampling) fact('source chroma', f.details.sourceSubsampling);
-    } else if (f.kind === 'noise') {
-      const d = f.details;
-      fact('baseline', `${fmt(d.globalSigma * 255, 2)} levels`);
-      fact('from spectrum', `${fmt(d.spectralSigma * 255, 2)} levels`);
-      fact('noisier blocks', `${fmt(d.noisierFraction * 100, 0)} %`);
-      fact('smoother blocks', `${fmt(d.smootherFraction * 100, 0)} %`);
-      fact('noise shape', `${d.highBandDb >= 0 ? '+' : ''}${fmt(d.highBandDb, 1)} dB high band`);
-    } else if (f.kind === 'hotpixels') {
-      fact('count', String(f.details.count));
-      const s = f.details.sample.slice(0, 3).map((p) => `(${p.x}, ${p.y})`).join(' ');
-      if (s) fact('first', s);
+    if (f.kind === 'noise') {
+      const red = el('input', { type: 'range', min: '0', max: '95', value: String(Math.round(f.details.reduction * 100)) }) as HTMLInputElement;
+      const rv = el('span', { class: 'val' }, `${Math.round(f.details.reduction * 100)} %`);
+      red.addEventListener('input', () => (rv.textContent = `${red.value} %`));
+      red.addEventListener('change', () => {
+        f.details.reduction = Number(red.value) / 100;
+        f.enabled = true;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: '0 only levels the grain; higher removes it everywhere' }, el('span', {}, 'Remove grain'), red, rv));
     }
-    if (st?.rms !== undefined) fact('change', `${fmt(st.rms, 2)} levels rms`);
-    box.appendChild(facts);
+    if (f.kind === 'jpeg-grid') {
+      const step = el('input', { type: 'range', min: '2', max: '40', value: String(Math.round(f.details.maxStep * 100)) }) as HTMLInputElement;
+      const sv = el('span', { class: 'val' }, `${Math.round(f.details.maxStep * 255)} lv`);
+      step.addEventListener('input', () => (sv.textContent = `${Math.round((Number(step.value) / 100) * 255)} lv`));
+      step.addEventListener('change', () => {
+        f.details.maxStep = Number(step.value) / 100;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: 'Steps bigger than this are treated as real edges and left alone' }, el('span', {}, 'Blend steps up to'), step, sv));
+      const span = el('select') as HTMLSelectElement;
+      for (const [v, label] of [
+        ['4', 'over 4 pixels (light touch)'],
+        ['8', 'over the whole block (removes the grid)'],
+      ]) {
+        const o = el('option', { value: v }, label) as HTMLOptionElement;
+        if (Number(v) === f.details.span) o.selected = true;
+        span.appendChild(o);
+      }
+      span.addEventListener('change', () => {
+        f.details.span = Number(span.value) as 4 | 8;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Spread'), span));
+    }
 
     // method
     if (f.kind === 'periodic') {
       const sel = el('select') as HTMLSelectElement;
       for (const [v, label] of [
-        ['parametric', 'Subtract the fitted pattern (exact, same everywhere)'],
-        ['parametric-tiled', 'Subtract the fitted pattern, tile by tile'],
-        ['flatten', 'Flatten the spectrum at this frequency'],
-        ['notch', 'Notch this frequency out'],
+        ['parametric', 'Subtract it exactly (same everywhere)'],
+        ['parametric-tiled', 'Subtract it region by region (if it varies)'],
+        ['flatten', 'Smooth it out of the spectrum'],
+        ['notch', 'Cut that frequency out completely'],
       ] as [PeriodicMethod, string][]) {
         const o = el('option', { value: v }, label) as HTMLOptionElement;
         if (v === f.method) o.selected = true;
@@ -619,47 +691,92 @@ export class App {
         f.method = sel.value as PeriodicMethod;
         void this.rebuildFrom(f);
       });
-      box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Method'), sel));
+      box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'How'), sel));
     }
 
-    // mask tools
+    // where it applies
+    box.appendChild(el('div', { class: 'subhead' }, 'Where it applies'));
     const tools = el('div', { class: 'tools' });
-    const maskBtn = el('button', { class: this.viewer.mode === 'mask' ? 'on' : '', onclick: () => this.setMode(this.viewer.mode === 'mask' ? 'result' : 'mask') }, 'Paint where it applies');
-    tools.appendChild(maskBtn);
+    const brushOn = this.viewer.maskMode;
+    tools.appendChild(el('button', { class: brushOn ? 'on' : '', onclick: () => this.toggleBrush() }, brushOn ? 'Brush is on' : 'Brush'));
     const eraseBtn = el(
       'button',
       {
-        class: this.viewer.brush.erase ? 'on' : '',
+        class: 'quiet',
         onclick: () => {
           this.viewer.brush.erase = !this.viewer.brush.erase;
-          eraseBtn.classList.toggle('on', this.viewer.brush.erase);
+          eraseBtn.textContent = this.viewer.brush.erase ? 'Painting: hold the fix back' : 'Painting: put the fix back';
         },
       },
-      'Erase',
+      this.viewer.brush.erase ? 'Painting: hold the fix back' : 'Painting: put the fix back',
     );
     tools.appendChild(eraseBtn);
     tools.appendChild(el('button', { onclick: () => void this.maskFill(255) }, 'Everywhere'));
     tools.appendChild(el('button', { onclick: () => void this.maskFill(0) }, 'Nowhere'));
-    tools.appendChild(el('button', { onclick: () => void this.maskInvert() }, 'Invert'));
-    if (f.kind === 'periodic') tools.appendChild(el('button', { onclick: () => void this.maskFromAnalysis() }, 'Where it was found'));
+    tools.appendChild(el('button', { onclick: () => void this.maskInvert() }, 'Swap'));
+    if (f.kind === 'periodic') tools.appendChild(el('button', { onclick: () => void this.maskFromAnalysis() }, 'Only where it was found'));
     box.appendChild(tools);
-    const size = el('input', { type: 'range', min: '4', max: '600', value: String(this.viewer.brush.size) }) as HTMLInputElement;
-    size.addEventListener('input', () => (this.viewer.brush.size = Number(size.value)));
+    const size = el('input', { type: 'range', min: '4', max: '800', value: String(this.viewer.brush.size) }) as HTMLInputElement;
+    const sizeVal = el('span', { class: 'val' }, `${this.viewer.brush.size} px`);
+    size.addEventListener('input', () => {
+      this.viewer.brush.size = Number(size.value);
+      sizeVal.textContent = `${size.value} px`;
+    });
     const hard = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(this.viewer.brush.hardness * 100)) }) as HTMLInputElement;
     hard.addEventListener('input', () => (this.viewer.brush.hardness = Number(hard.value) / 100));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush size'), size, sizeVal));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush edge'), hard, el('span', { class: 'val' }, 'soft → hard')));
     const lo = el('input', { type: 'range', min: '0', max: '100', value: '0' }) as HTMLInputElement;
     const hi = el('input', { type: 'range', min: '0', max: '100', value: '100' }) as HTMLInputElement;
-    const lumVal = el('span', { class: 'val' }, '0–100 %');
+    const lumVal = el('span', { class: 'val' }, 'dark → bright');
     const applyLum = (): void => {
       lumVal.textContent = `${lo.value}–${hi.value} %`;
       void this.maskFromLuminosity(Number(lo.value) / 100, Number(hi.value) / 100);
     };
     lo.addEventListener('change', applyLum);
     hi.addEventListener('change', applyLum);
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'By brightness'), el('div', { style: 'display:flex;gap:4px' }, lo, hi), lumVal));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush size'), size, el('span', { class: 'val' }, 'px')));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush edge'), hard, el('span', { class: 'val' }, 'soft→hard')));
-    box.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'In mask view: drag to paint, shift-wheel to resize the brush, alt-drag to pan. Amber = fix applies.'));
+    box.appendChild(el('div', { class: 'row', title: 'Apply the fix only to this brightness range' }, el('span', {}, 'By brightness'), el('div', { style: 'display:flex;gap:4px' }, lo, hi), lumVal));
+    box.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'With the brush on, drag over the picture. Amber shows where the fix is held back. Shift + wheel resizes the brush; hold Alt to drag the picture instead.'));
+
+    // technical details, collapsed
+    const det = el('details', { class: 'advanced' }, el('summary', {}, 'Measurements'));
+    const facts = el('div', { class: 'facts' });
+    const fact = (k: string, v: string): void => {
+      facts.appendChild(el('span', {}, k));
+      facts.appendChild(el('b', {}, v));
+    };
+    if (f.kind === 'periodic') {
+      const d = f.details;
+      fact('frequency', `${fmt(d.u, 4)}, ${fmt(d.v, 4)} cycles/px`);
+      fact('period', `${fmt(d.period, 3)} px`);
+      fact('angle', `${fmt(d.angleDeg, 2)}°`);
+      if (d.lpi) fact('screen ruling', `${fmt(d.lpi, 1)} lines/inch`);
+      fact('strength', d.stationary ? `${fmt(d.amplitude * 255, 2)} levels` : `${fmt(d.amplitude * 255, 2)} typical, ${fmt(d.amplitudeP90 * 255, 2)} at most`);
+      fact('stands out by', `${fmt(d.excessDb, 1)} dB (z ${fmt(d.z, 1)})`);
+      fact('same everywhere', d.stationary ? 'yes' : 'no');
+      fact('phase agreement', fmt(d.coherence, 2));
+      fact('found in', `${fmt(f.extent * 100, 0)} % of the tiles`);
+      if (d.harmonics.length) fact('harmonics', d.harmonics.map((h) => `${h.order}×`).join(' '));
+    } else if (f.kind === 'jpeg-grid') {
+      fact('grid offset', `${f.details.offsetX}, ${f.details.offsetY}`);
+      fact('edge steps', `${fmt(f.details.stepLevels, 2)} levels, +${fmt(f.details.strengthX * 100, 0)} % / +${fmt(f.details.strengthY * 100, 0)} % over the texture`);
+      if (f.details.sourceQuality) fact('source quality', `≈ ${fmt(f.details.sourceQuality, 0)}`);
+      if (f.details.sourceSubsampling) fact('source colour detail', f.details.sourceSubsampling);
+    } else if (f.kind === 'noise') {
+      const d = f.details;
+      fact('grain', `${fmt(d.globalSigma * 255, 2)} levels`);
+      fact('grain, from spectrum', `${fmt(d.spectralSigma * 255, 2)} levels`);
+      fact('grainier regions', `${fmt(d.noisierFraction * 100, 0)} %`);
+      fact('smoother regions', `${fmt(d.smootherFraction * 100, 0)} %`);
+      fact('fine vs coarse', `${d.highBandDb >= 0 ? '+' : ''}${fmt(d.highBandDb, 1)} dB`);
+    } else if (f.kind === 'hotpixels') {
+      fact('count', String(f.details.count));
+      const sm = f.details.sample.slice(0, 3).map((p) => `(${p.x}, ${p.y})`).join(' ');
+      if (sm) fact('first', sm);
+    }
+    if (st?.rms !== undefined) fact('changes the picture by', `${fmt(st.rms, 2)} levels on average`);
+    det.appendChild(facts);
+    box.appendChild(det);
   }
 
   // --- masks -------------------------------------------------------------------------
@@ -725,7 +842,7 @@ export class App {
   private async addPeak(u: number, v: number): Promise<void> {
     if (!this.analysis || this.busy) return;
     this.spectrum.addMode = false;
-    this.setStatus('Measuring the pattern at that frequency…');
+    this.setStatus('Measuring the pattern at that spot…');
     const f = await this.client.addPeak(u, v);
     this.analysis.findings.push(f);
     this.spectrum.setAnalysis(this.analysis, this.info?.meta.dpi ?? null);
@@ -749,16 +866,15 @@ export class App {
     };
     fact('file', m.fileName);
     fact('size', `${this.info.w} × ${this.info.h} px`);
-    fact('decoded with', m.decoder === 'mozjpeg' ? 'mozjpeg (exact)' : m.decoder === 'png' ? `own PNG decoder, ${m.bitDepth}-bit` : m.decoder === 'libheif' ? 'libheif' : 'browser');
     if (m.jpeg) {
-      fact('source quality', m.jpeg.quality ? `≈ ${fmt(m.jpeg.quality, 0)}` : 'unknown');
-      fact('chroma', `${m.jpeg.subsampling}${m.jpeg.progressive ? ', progressive' : ''}`);
+      fact('last saved at', m.jpeg.quality ? `quality ≈ ${fmt(m.jpeg.quality, 0)}` : 'unknown quality');
+      fact('colour detail', m.jpeg.subsampling === '4:4:4' ? 'full' : `reduced (${m.jpeg.subsampling})`);
     }
     if (m.exifSummary.make || m.exifSummary.model) fact('camera', `${m.exifSummary.make ?? ''} ${m.exifSummary.model ?? ''}`.trim());
-    if (m.orientationApplied > 1) fact('orientation', `${m.orientationApplied} applied to pixels`);
+    if (m.orientationApplied > 1) fact('rotation', 'applied from the camera tag');
     if (m.dpi) fact('resolution', `${fmt(m.dpi, 0)} dpi`);
-    fact('colour profile', m.icc ? `${(m.icc.length / 1024).toFixed(1)} kB, kept` : 'none');
-    if (this.analysis) fact('tiles', `${this.analysis.tile.size} px, ${this.analysis.spectrum.tiles} averaged`);
+    fact('colour profile', m.icc ? 'kept' : 'none');
+    fact('read with', m.decoder === 'mozjpeg' ? 'mozjpeg (exact)' : m.decoder === 'png' ? `own PNG reader, ${m.bitDepth}-bit` : m.decoder === 'libheif' ? 'libheif' : 'the browser');
   }
 
   // --- export -----------------------------------------------------------------------
@@ -766,52 +882,54 @@ export class App {
     const box = this.exportEl;
     box.innerHTML = '';
     const o = this.exportOptions;
+    box.appendChild(el('div', { class: 'intro' }, 'Always a fresh JPEG. After saving, the file is reopened and checked, and you get a report of what survived.'));
     const q = el('input', { type: 'range', min: '60', max: '100', value: String(o.quality) }) as HTMLInputElement;
     const qv = el('span', { class: 'val' }, String(o.quality));
     q.addEventListener('input', () => {
       o.quality = Number(q.value);
       qv.textContent = q.value;
     });
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Quality'), q, qv));
-    const chroma = el('select') as HTMLSelectElement;
-    for (const v of ['4:4:4', '4:2:0']) {
-      const opt = el('option', { value: v }, v === '4:4:4' ? '4:4:4 full colour detail' : '4:2:0 halved colour detail') as HTMLOptionElement;
-      if (v === o.chroma) opt.selected = true;
-      chroma.appendChild(opt);
-    }
-    chroma.addEventListener('change', () => (o.chroma = chroma.value as JpegExportOptions['chroma']));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Chroma'), chroma, el('span')));
+    box.appendChild(el('div', { class: 'row', title: '95 keeps nearly everything; below 90 the blocky look creeps back in' }, el('span', {}, 'Quality'), q, qv));
+    const chroma = el('input', { type: 'checkbox' }) as HTMLInputElement;
+    chroma.checked = o.chroma === '4:4:4';
+    chroma.addEventListener('change', () => (o.chroma = chroma.checked ? '4:4:4' : '4:2:0'));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Colour'), el('label', { title: 'Off halves the colour resolution, like most cameras and apps do; on keeps it (slightly bigger file)' }, chroma, ' keep full colour detail'), el('span')));
+
+    const adv = el('details', { class: 'advanced' }, el('summary', {}, 'File options'));
     const prog = el('input', { type: 'checkbox' }) as HTMLInputElement;
     prog.checked = o.progressive;
     prog.addEventListener('change', () => (o.progressive = prog.checked));
     const trellis = el('input', { type: 'checkbox' }) as HTMLInputElement;
     trellis.checked = o.trellis;
     trellis.addEventListener('change', () => (o.trellis = trellis.checked));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Encoding'), el('label', {}, prog, ' progressive'), el('label', {}, trellis, ' trellis')));
+    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Progressive'), el('label', {}, prog, ' the picture loads in passes on the web; same quality, slightly smaller'), el('span')));
+    adv.appendChild(el('div', { class: 'row' }, el('span', {}, 'Trellis'), el('label', {}, trellis, ' spend longer encoding for a smaller file; same quality'), el('span')));
+    box.appendChild(adv);
 
     const b = this.budget;
-    const peak = el('input', { type: 'number', min: '3', max: '40', step: '1', value: String(b.maxPeakDb) }) as HTMLInputElement;
-    peak.addEventListener('change', () => (b.maxPeakDb = Number(peak.value)));
-    const psnr = el('input', { type: 'number', min: '30', max: '60', step: '1', value: String(b.minEncodePsnr) }) as HTMLInputElement;
-    psnr.addEventListener('change', () => (b.minEncodePsnr = Number(psnr.value)));
-    const blk = el('input', { type: 'number', min: '1', max: '50', step: '1', value: String(Math.round(b.maxBlockStrength * 100)) }) as HTMLInputElement;
-    blk.addEventListener('change', () => (b.maxBlockStrength = Number(blk.value) / 100));
+    const check = el('details', { class: 'advanced' }, el('summary', {}, 'What counts as a problem in the saved file'));
     const lv = el('input', { type: 'number', min: '0.1', max: '20', step: '0.1', value: String(b.minPeakLevels) }) as HTMLInputElement;
     lv.addEventListener('change', () => (b.minPeakLevels = Number(lv.value)));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Pass if'), el('span', {}, 'no peak over ', peak, ' dB and ', lv, ' levels'), el('span')));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}), el('span', {}, 'block grid under ', blk, ' %'), el('span')));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}), el('span', {}, 'encode error better than ', psnr, ' dB'), el('span')));
+    const blk = el('input', { type: 'number', min: '1', max: '50', step: '1', value: String(Math.round(b.maxBlockStrength * 100)) }) as HTMLInputElement;
+    blk.addEventListener('change', () => (b.maxBlockStrength = Number(blk.value) / 100));
+    const lossLevels = 255 / Math.pow(10, b.minEncodePsnr / 20);
+    const loss = el('input', { type: 'number', min: '0.3', max: '12', step: '0.1', value: lossLevels.toFixed(1) }) as HTMLInputElement;
+    loss.addEventListener('change', () => (b.minEncodePsnr = 20 * Math.log10(255 / Math.max(0.1, Number(loss.value)))));
+    check.appendChild(el('div', { class: 'row' }, el('span', {}, 'A pattern'), el('span', {}, 'still visible at ', lv, ' levels or more'), el('span')));
+    check.appendChild(el('div', { class: 'row' }, el('span', {}, 'Block edges'), el('span', {}, 'stronger than ', blk, ' % above the texture'), el('span')));
+    check.appendChild(el('div', { class: 'row' }, el('span', {}, 'Saving itself'), el('span', {}, 'changed pixels by more than ', loss, ' levels on average'), el('span')));
+    box.appendChild(check);
 
     const actions = el('div', { class: 'actions' });
-    actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(), disabled: this.analysis ? undefined : '' }, 'Export and verify'));
-    actions.appendChild(el('button', { onclick: () => this.downloadRecipe(), disabled: this.analysis ? undefined : '' }, 'Save recipe'));
+    actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
+    actions.appendChild(el('button', { onclick: () => this.downloadRecipe(), disabled: this.analysis ? undefined : '', title: 'Everything you set here, as a file you can load for another photo' }, 'Save settings file'));
     box.appendChild(actions);
 
     if (this.report) box.appendChild(this.renderReport(this.report));
     if (this.analysis) {
-      const nc = el('div', { class: 'notchecked' }, 'Not checked by this tool:');
+      const nc = el('div', { class: 'notchecked' }, 'Things this tool does not look for:');
       const ul = el('ul');
-      for (const s of this.analysis.notChecked) ul.appendChild(el('li', {}, s));
+      for (const t of this.analysis.notChecked) ul.appendChild(el('li', {}, t));
       nc.appendChild(ul);
       box.appendChild(nc);
     }
@@ -819,7 +937,7 @@ export class App {
 
   private renderReport(r: RoundTripReport): HTMLElement {
     const box = el('div', { class: `report ${r.pass ? 'pass' : 'fail'}` });
-    box.appendChild(el('div', { class: 'verdict' }, r.pass ? 'Passed on the exported file' : 'Did not pass on the exported file'));
+    box.appendChild(el('div', { class: 'verdict' }, r.pass ? 'Checked the saved file: all clear' : 'Checked the saved file: problems remain'));
     if (r.reasons.length) {
       const ul = el('ul');
       for (const s of r.reasons) ul.appendChild(el('li', {}, s));
@@ -830,18 +948,18 @@ export class App {
       facts.appendChild(el('span', {}, k));
       facts.appendChild(el('b', {}, v));
     };
-    fact('file', `${(r.bytes / 1024).toFixed(0)} kB, q${r.quality}, ${r.chroma}`);
-    fact('encode error', `${fmt(r.encodeRmsLevels, 2)} levels rms (${fmt(r.encodePsnr, 1)} dB)`);
-    fact('periodic left', r.residualPeriodic ? r.residual.map((f) => f.kind === 'periodic' ? `${fmt(f.details.period, 2)} px @ ${fmt(f.details.excessDb, 0)} dB` : '').join(', ') : 'none above budget');
-    fact('block grid', r.blockGrid.detected ? `${fmt(r.blockGrid.strength * 100, 0)} %` : 'not detected');
-    fact('grain kept', r.noise.expectedLevels > 0 ? `${fmt((100 * r.noise.globalSigmaLevels) / r.noise.expectedLevels, 0)} % (${fmt(r.noise.globalSigmaLevels, 2)} of ${fmt(r.noise.expectedLevels, 2)} levels)` : 'n/a');
+    fact('file', `${(r.bytes / 1024).toFixed(0)} kB, quality ${r.quality}, ${r.chroma === '4:4:4' ? 'full colour detail' : 'reduced colour detail'}`);
+    fact('saving changed pixels by', `${fmt(r.encodeRmsLevels, 2)} levels on average`);
+    fact('patterns still visible', r.residualPeriodic ? r.residual.map((f) => (f.kind === 'periodic' ? `every ${fmt(f.details.period, 1)} px, ${fmt(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255, 1)} levels` : '')).join('; ') : 'none');
+    fact('block edges', r.blockGrid.detected ? `steps of ${fmt(r.blockGrid.stepLevels, 2)} levels${r.blockGrid.stepLevels < 0.5 ? ' (invisible)' : ''}` : 'none found');
+    fact('grain left', r.noise.expectedLevels > 0 ? `${fmt((100 * r.noise.globalSigmaLevels) / r.noise.expectedLevels, 0)} % of what the photo had` : 'n/a');
     box.appendChild(facts);
     const actions = el('div', { class: 'actions' });
     if (this.jpegUrl) {
       const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';
-      actions.appendChild(el('a', { href: this.jpegUrl, download: name }, `Download ${name}`));
+      actions.appendChild(el('a', { href: this.jpegUrl, download: name }, `Download ${name} again`));
     }
-    if (!r.pass && r.quality < 100 && r.reasons.some((s) => s.includes('encode error') || s.includes('block grid')))
+    if (!r.pass && r.quality < 100 && r.reasons.some((s) => s.includes('saving changed') || s.includes('block edges')))
       actions.appendChild(
         el(
           'button',
@@ -852,7 +970,7 @@ export class App {
               void this.doExport();
             },
           },
-          `Raise quality to ${Math.min(100, r.quality + 2)} and retry`,
+          `Save again at quality ${Math.min(100, r.quality + 2)}`,
         ),
       );
     for (const sf of r.suggested) {
@@ -862,11 +980,11 @@ export class App {
           {
             onclick: () => void this.adoptSuggested(sf),
           },
-          `Add fix: ${sf.label.toLowerCase()}`,
+          `Add fix: ${plainLabel(sf).toLowerCase()}`,
         ),
       );
     }
-    actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadReport() }, 'Report as JSON'));
+    actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadReport() }, 'Full report (JSON)'));
     box.appendChild(actions);
     return box;
   }
@@ -882,7 +1000,7 @@ export class App {
     this.renderExport();
     this.select(copy.id);
     await this.rebuildFrom(copy);
-    this.setStatus(`${copy.label} added — export again to verify`);
+    this.setStatus(`${plainLabel(copy)} added — save again to check it`);
   }
 
   private async doExport(): Promise<void> {
@@ -891,12 +1009,12 @@ export class App {
     this.exportBtn.disabled = true;
     try {
       const { jpeg, report } = await this.client.export(this.layerSettings(), this.master, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
-        this.setStatus(`Exporting: ${stage}`, fr),
+        this.setStatus(`Saving: ${stage.replace('verify:', 'checking the saved file — ')}`, fr),
       );
       if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
       this.report = report;
-      this.setStatus(report.pass ? `Exported ${(jpeg.length / 1024).toFixed(0)} kB — passed verification` : `Exported ${(jpeg.length / 1024).toFixed(0)} kB — verification found problems`);
+      this.setStatus(report.pass ? `Saved ${(jpeg.length / 1024).toFixed(0)} kB and checked it: all clear` : `Saved ${(jpeg.length / 1024).toFixed(0)} kB; the check found problems, see the report`);
       this.renderExport();
       // offer the download right away
       const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';
@@ -905,7 +1023,7 @@ export class App {
       a.download = name;
       a.click();
     } catch (e) {
-      this.setStatus(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+      this.setStatus(`Saving failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       this.busy = false;
       this.exportBtn.disabled = false;
@@ -937,9 +1055,9 @@ export class App {
         this.queueRender();
         this.busy = false;
       }
-      this.setStatus(`Recipe ${file.name} loaded`);
+      this.setStatus(`Settings file ${file.name} loaded`);
     } catch (e) {
-      this.setStatus(`Could not load recipe: ${e instanceof Error ? e.message : String(e)}`);
+      this.setStatus(`Could not load that settings file: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
 

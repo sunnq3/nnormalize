@@ -180,9 +180,11 @@ export class SpectrumPanel {
     const angle = (Math.atan2(-v, u) * 180) / Math.PI;
     const dB = 10 * (sp.logPower[i] - sp.background[i]);
     const lpi = this.dpi ? ` · ${(r * this.dpi).toFixed(1)} lpi` : '';
+    const amp = 2 * Math.sqrt(Math.pow(10, sp.logPower[i])) * 255;
+    const how = dB >= 12 ? 'stands out' : dB >= 6 ? 'slightly raised' : 'nothing special here';
     this.cb.onHover(
-      `<b>u</b> ${u.toFixed(4)} <b>v</b> ${v.toFixed(4)} cyc/px${lpi}<br><b>period</b> ${Number.isFinite(period) ? period.toFixed(2) + ' px' : '∞'} <b>angle</b> ${angle.toFixed(1)}°<br><b>${dB.toFixed(1)} dB</b> over background, z ${sp.z[i].toFixed(1)}${
-        this.addMode ? '<br>click to add a finding here' : ''
+      `Here: repeats every <b>${Number.isFinite(period) ? period.toFixed(2) + ' px' : '∞'}</b> at <b>${angle.toFixed(1)}°</b>${lpi}<br><b>${amp.toFixed(2)} levels</b> strong, ${dB.toFixed(1)} dB above its surroundings — ${how}<br><span class="tech">u ${u.toFixed(4)} v ${v.toFixed(4)} cycles/px · z ${sp.z[i].toFixed(1)}</span>${
+        this.addMode ? '<br>Click to add a pattern here' : ''
       }`,
     );
   }

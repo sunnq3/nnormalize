@@ -478,3 +478,46 @@ input[type='number'] {
     transition: none !important;
   }
 }
+
+/* ---- plain-language additions ---- */
+.intro {
+  color: var(--ink-soft);
+  margin: -4px 0 8px;
+}
+.fixname {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.subhead {
+  margin: 10px 0 4px;
+  font-weight: 500;
+}
+.help summary,
+.advanced summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+.help summary:hover,
+.advanced summary:hover {
+  color: var(--ink);
+}
+.help p {
+  margin: 6px 0;
+  color: var(--ink-soft);
+}
+.advanced {
+  margin-top: 8px;
+}
+.advanced[open] {
+  padding-bottom: 4px;
+}
+.readout .tech {
+  color: var(--ink-faint);
+}
+.top .level select {
+  margin-left: 4px;
+}
+.top .level {
+  color: var(--ink-soft);
+  white-space: nowrap;
+}

@@ -13,6 +13,7 @@ import { lumaPlane, type Plane } from '../dsp/plane';
 import { tileGrid, welchSpectrum, type TileGrid } from '../dsp/tiles';
 import { window2d } from '../dsp/window';
 import {
+  LEVELS,
   NOT_CHECKED,
   defaultAnalysisOptions,
   type Analysis,
@@ -61,7 +62,15 @@ export function subsampleGrid(grid: TileGrid, maxTiles: number): TileGrid {
 const n0 = (n: number): number => n;
 
 export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = {}, progress: Progress = () => {}): Analysis {
-  const opts: AnalysisOptions = { ...defaultAnalysisOptions, ...optsIn };
+  // the clean-up level sets the thresholds; explicit options still win
+  const level = LEVELS[optsIn.level ?? defaultAnalysisOptions.level];
+  const opts: AnalysisOptions = {
+    ...defaultAnalysisOptions,
+    zThreshold: level.zThreshold,
+    minAmplitudeLevels: level.minAmplitudeLevels,
+    noiseThresholdDb: level.noiseThresholdDb,
+    ...optsIn,
+  };
   const timings: Record<string, number> = {};
   const t0 = performance.now();
   const mark = (k: string, from: number): number => {
@@ -137,10 +146,13 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     const severity = Math.max(0, Math.min(1, (fundamental.excessDb - 6) / 40)) * Math.min(1, m.amplitude / (4 * floor));
     // a pattern confined to part of the frame is judged by what it reaches there
     const visible = Math.max(m.amplitude, m.amplitudeP90) >= floor;
-    const strong = fundamental.excessDb >= 12 && fundamental.z >= 8 && visible;
+    // the strong levels also tick weak peaks, but only ones a person could see
+    const seeable = Math.max(m.amplitude, m.amplitudeP90) * 255 >= Math.max(1, opts.minAmplitudeLevels);
+    const strong = (fundamental.excessDb >= 12 && fundamental.z >= 8 && seeable) || (level.enableWeakPeaks && seeable);
     const confidence = fundamental.z > 15 && m.phaseCoherence > 0.6 ? 'high' : fundamental.z >= 8 ? 'medium' : 'low';
     let note = '';
     if (!visible) note = `Only ${(m.amplitudeP90 * 255).toFixed(2)} levels at most: below the ${opts.minAmplitudeLevels} level floor, not visible. Left unticked.`;
+    else if (!seeable) note = `Only ${(Math.max(m.amplitude, m.amplitudeP90) * 255).toFixed(2)} levels: real but too faint to see. Left unticked; tick it if you want it gone anyway.`;
     else if (!strong) note = 'Weak; could be real texture (fabric, screen, brick). Left unticked.';
     else if (m.phaseCoherence < 0.4 && !m.stationary) note = 'Varies across the frame; tiled subtraction will follow it.';
 
@@ -234,11 +246,16 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     offsetY: blockGrid.offsetY,
     strengthX: blockGrid.strengthX,
     strengthY: blockGrid.strengthY,
+    stepLevels: Math.max(blockGrid.stepX, blockGrid.stepY) * 255,
     sourceQuality: input.sourceQuality,
     sourceSubsampling: input.sourceSubsampling,
+    maxStep: level.deblockMaxStep,
+    activityRatio: level.deblockActivityRatio,
+    span: level.deblockSpan,
   };
   if (blockGrid.detected) {
     const s = Math.max(blockGrid.strengthX, blockGrid.strengthY);
+    const stepLv = Math.max(blockGrid.stepX, blockGrid.stepY) * 255;
     const jf: JpegGridFinding = {
       id: 'jpeg-grid',
       kind: 'jpeg-grid',
@@ -246,11 +263,11 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       description: `8×8 grid at offset (${blockGrid.offsetX}, ${blockGrid.offsetY}); boundary steps ${(s * 100).toFixed(0)} % above texture${
         input.sourceQuality ? `; source quality ≈ ${input.sourceQuality.toFixed(0)}` : ''
       }${input.sourceSubsampling ? `, ${input.sourceSubsampling}` : ''}`,
-      severity: Math.min(1, s / 0.5),
+      severity: Math.min(1, stepLv / 4),
       extent: 1,
-      enabled: s >= 0.05,
+      enabled: (s >= 0.05 && stepLv >= 0.5) || (level.deblockAlwaysOn && stepLv >= 0.25),
       confidence: Math.min(blockGrid.confidenceX, blockGrid.confidenceY) > 8 ? 'high' : 'medium',
-      note: s < 0.05 ? 'Faint grid; deblocking left off by default.' : '',
+      note: stepLv < 0.5 ? `Block steps of only ${stepLv.toFixed(2)} levels: not visible.` : '',
       strength: 1,
       method: 'deblock',
       details: gridDetails,
@@ -298,21 +315,25 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     curve: nmodel.curve,
     highBandDb,
     spectralSigma,
+    reduction: level.noiseReduction,
   };
   {
     const frac = disc.noisierFraction + disc.smootherFraction;
     const nf: NoiseFinding = {
       id: 'noise',
       kind: 'noise',
-      label: 'Uneven noise',
-      description: `baseline ${(nmodel.globalSigma * 255).toFixed(2)} levels; ${(disc.noisierFraction * 100).toFixed(0)} % of the frame noisier and ${(
-        disc.smootherFraction * 100
-      ).toFixed(0)} % smoother than the model by more than ${disc.thresholdDb} dB`,
-      severity: Math.min(1, frac / 0.5),
-      extent: frac,
-      enabled: frac >= 0.05,
+      label: level.noiseReduction > 0 ? 'Grain and noise' : 'Uneven grain',
+      description:
+        level.noiseReduction > 0
+          ? `grain of ${(nmodel.globalSigma * 255).toFixed(1)} levels; reduce it by ${Math.round(level.noiseReduction * 100)} % everywhere`
+          : `grain of ${(nmodel.globalSigma * 255).toFixed(1)} levels; ${(disc.noisierFraction * 100).toFixed(0)} % of the photo grainier and ${(
+              disc.smootherFraction * 100
+            ).toFixed(0)} % smoother than the rest`,
+      severity: level.noiseReduction > 0 ? Math.min(1, (nmodel.globalSigma * 255) / 6) : Math.min(1, frac / 0.5),
+      extent: level.noiseReduction > 0 ? 1 : frac,
+      enabled: frac >= 0.05 || level.noiseAlwaysOn,
       confidence: frac >= 0.15 ? 'high' : frac >= 0.05 ? 'medium' : 'low',
-      note: frac < 0.05 ? 'Noise is already level; nothing to normalise.' : '',
+      note: frac < 0.05 && !level.noiseAlwaysOn ? 'Grain is already even across the photo; nothing to level. Raise the clean-up level to reduce it instead.' : '',
       strength: 1,
       method: 'normalise',
       details: noiseDetails,

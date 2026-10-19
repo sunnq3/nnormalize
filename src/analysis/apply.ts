@@ -53,15 +53,11 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
       case 'jpeg-grid': {
         const g = finding.details;
         out.push(
-          deblockDelta(ch, {
-            offsetX: g.offsetX,
-            offsetY: g.offsetY,
-            strengthX: g.strengthX,
-            strengthY: g.strengthY,
-            confidenceX: 0,
-            confidenceY: 0,
-            detected: true,
-          }),
+          deblockDelta(
+            ch,
+            { offsetX: g.offsetX, offsetY: g.offsetY, strengthX: g.strengthX, strengthY: g.strengthY, stepX: 0, stepY: 0, confidenceX: 0, confidenceY: 0, detected: true },
+            { maxStep: g.maxStep ?? 0.08, activityRatio: g.activityRatio ?? 1.5, span: g.span ?? 4 },
+          ),
         );
         sub(1);
         break;
@@ -69,9 +65,13 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
       case 'noise': {
         const map = noiseMap(ch, finding.details.block);
         const model = noiseModel(map);
-        const dn = denoiseDelta(ch, map, model, { thresholdDb: Math.max(1.5, finding.details.thresholdDb / 2) });
-        const rg = regrainDelta(ch, map, model, { thresholdDb: Math.max(1.5, finding.details.thresholdDb / 2), seed: 0x5eed + ci });
-        addInto(dn.delta, rg.delta);
+        const reduction = Math.min(0.95, Math.max(0, finding.details.reduction ?? 0));
+        const thr = Math.max(1.5, finding.details.thresholdDb / 2);
+        const dn = denoiseDelta(ch, map, model, { thresholdDb: reduction > 0 ? 0 : thr, targetScale: 1 - reduction });
+        if (reduction === 0) {
+          const rg = regrainDelta(ch, map, model, { thresholdDb: thr, seed: 0x5eed + ci });
+          addInto(dn.delta, rg.delta);
+        }
         out.push(dn.delta);
         sub(1);
         break;
