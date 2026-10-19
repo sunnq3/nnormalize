@@ -1,0 +1,26 @@
+{
+  "name": "nnormalize",
+  "version": "0.1.0",
+  "description": "Browser tool that finds periodic interference, compression damage and noise discrepancies in a photo's spectrum, lets you dial each fix down globally or by area, and always exports a verified JPEG.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "build:single": "vite build --config vite.single.config.ts",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "@jsquash/jpeg": "^1.6.0"
+  }
+}
