@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing';
+export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain';
 
 export interface HarmonicInfo {
   order: number;
@@ -91,6 +91,16 @@ export interface RingingDetails {
   amount: number; // 0..1
 }
 
+export interface GrainDetails {
+  /** grain to end up with everywhere, levels (the photo's own base grain before clean-up is the reference) */
+  targetLevels: number;
+  /** the photo's base grain before any clean-up, levels */
+  baseLevels: number;
+  /** colour part of the grain as a fraction of the luma part */
+  colour: number;
+  seed: number;
+}
+
 export interface HotPixelDetails {
   count: number;
   sample: { x: number; y: number; value: number; replacement: number; z: number }[]; // first N for display
@@ -144,7 +154,13 @@ export interface RingingFinding extends FindingBase {
   details: RingingDetails;
 }
 
-export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding;
+export interface GrainFinding extends FindingBase {
+  kind: 'grain';
+  method: 'regrain';
+  details: GrainDetails;
+}
+
+export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding;
 
 export interface SpectrumView {
   size: number;

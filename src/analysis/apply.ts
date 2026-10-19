@@ -7,6 +7,7 @@
 
 import { deblockDelta } from '../dsp/blocks';
 import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr } from '../dsp/chroma';
+import { grainDelta } from '../dsp/grain';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
 import { median9 } from '../dsp/hotpixels';
 import { denoiseDelta, noiseMap, noiseModel, regrainDelta } from '../dsp/noise';
@@ -76,6 +77,11 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
     });
     progress(1);
     return deltas as [Plane, Plane, Plane];
+  }
+  if (finding.kind === 'grain') {
+    const d = grainDelta(planes, { targetLevels: finding.details.targetLevels, colour: finding.details.colour, seed: finding.details.seed });
+    progress(1);
+    return d;
   }
   if (finding.kind === 'ringing') {
     const Y = lumaOf(planes);

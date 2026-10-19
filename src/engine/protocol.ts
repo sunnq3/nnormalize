@@ -62,6 +62,8 @@ export interface RoundTripReport {
   stable: boolean;
   /** block settling on the destination's coefficient grid, when it was done */
   settled: { quality: number; changedBlocks: number; blocks: number; meanChangeLevels: number } | null;
+  /** grain put back was scaled by this so the downloader's copy carries the amount set (1 = no scaling needed) */
+  grainScale: number;
   /** what the check simulated */
   checkLabel: string;
   /** per-fix survival through the simulated re-save, plus the before/after a downloader sees */

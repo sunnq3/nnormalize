@@ -6,6 +6,7 @@
 
 import { analyze } from '../analysis/analyze';
 import { jpegYccToRgb, rgbToJpegYcc, settleBlocks } from '../dsp/jpegdomain';
+import { noiseMap } from '../dsp/noise';
 import { measureSurvival } from '../analysis/survival';
 import { computeDelta } from '../analysis/apply';
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
@@ -22,7 +23,7 @@ import type { Budget, LayerSetting, LayerStats, LoadedInfo, RenderRequest, Rende
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
 /** Order in which correction stages are applied; later stages are computed on earlier ones. */
-export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, noise: 4, chroma: 5 };
+export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, noise: 4, chroma: 5, grain: 6 };
 
 /** Findings in the order their layers should be built. */
 export function stageSorted<T extends { kind: Finding['kind'] }>(findings: T[]): T[] {
@@ -515,40 +516,67 @@ export class Engine {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const profile = resolveProfile(profileId, customOptions);
     const opts = profile.encode;
-    progress('compose', 0);
-    const composed = this.compose(layers, master);
-    // Block settling at the destination's quality: when the file is written
-    // with the destination's own tables and the block fix is on, the luma is
-    // put on that quality's coefficient grid with block boundaries settled,
-    // so the destination's re-save cannot bring the steps back.
-    let settled: RoundTripReport['settled'] = null;
-    const blockFixOn = findings.some((f) => f.kind === 'jpeg-grid' && f.enabled) && layers.some((l) => l.id === 'jpeg-grid' && l.strength > 0);
-    if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
-      progress('settle', 0);
-      const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
-      const r = settleBlocks(Y, opts.quality);
-      const rgb = jpegYccToRgb(r.plane, Cb, Cr);
-      composed[0] = rgb[0];
-      composed[1] = rgb[1];
-      composed[2] = rgb[2];
-      settled = { quality: opts.quality, changedBlocks: r.changed, blocks: r.blocks, meanChangeLevels: r.meanChange * 255 };
-      progress('settle', 1);
-    }
-    progress('encode', 0);
     const meta = this.source.meta;
-    const enc = await encodeToJpeg(composed, opts, { exif: meta.exif, icc: meta.icc, xmp: meta.xmp }, (pass) =>
-      progress('encode', Math.min(1, pass / Math.max(1, opts.fixedPointPasses + 1))),
-    );
-    const jpeg = enc.jpeg;
+    const grainWant = findings.find((f) => f.kind === 'grain' && f.enabled && layers.some((l) => l.id === f.id && l.strength > 0));
+    const want = grainWant && grainWant.kind === 'grain' ? grainWant.details.targetLevels : 0;
+    // Grain put back is partly rounded away by the destination's re-save. The
+    // file is written once, the downloader's copy measured, and if the grain
+    // there is short of the amount set, the grain is scaled up and the file
+    // written again, so what was set is what the copy has.
+    let grainScale = 1;
+    let composed!: [Plane, Plane, Plane];
+    let settled: RoundTripReport['settled'] = null;
+    let jpeg!: Uint8Array;
+    let enc!: Awaited<ReturnType<typeof encodeToJpeg>>;
+    let ours!: [Plane, Plane, Plane];
+    let resDest!: [Plane, Plane, Plane];
+    let srcDest!: [Plane, Plane, Plane];
+    let survival!: ReturnType<typeof measureSurvival>;
+    for (let round = 0; round < 2; round++) {
+      const useLayers = grainScale === 1 ? layers : layers.map((l) => (l.id === grainWant?.id ? { ...l, strength: l.strength * grainScale } : l));
+      progress('compose', 0);
+      composed = this.compose(useLayers, master);
+      // Block settling at the destination's quality: when the file is written
+      // with the destination's own tables and the block fix is on, the luma is
+      // put on that quality's coefficient grid with block boundaries settled,
+      // so the destination's re-save cannot bring the steps back.
+      settled = null;
+      const blockFixOn = findings.some((f) => f.kind === 'jpeg-grid' && f.enabled) && layers.some((l) => l.id === 'jpeg-grid' && l.strength > 0);
+      if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
+        progress('settle', 0);
+        const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
+        const grainLevels = noiseMap(Y, 32).refSigma * 255;
+        const r = settleBlocks(Y, opts.quality, { grainLevels });
+        const rgb = jpegYccToRgb(r.plane, Cb, Cr);
+        composed[0] = rgb[0];
+        composed[1] = rgb[1];
+        composed[2] = rgb[2];
+        settled = { quality: opts.quality, changedBlocks: r.changed, blocks: r.blocks, meanChangeLevels: r.meanChange * 255 };
+        progress('settle', 1);
+      }
+      progress('encode', 0);
+      enc = await encodeToJpeg(composed, opts, { exif: meta.exif, icc: meta.icc, xmp: meta.xmp }, (pass) =>
+        progress('encode', Math.min(1, pass / Math.max(1, opts.fixedPointPasses + 1))),
+      );
+      jpeg = enc.jpeg;
 
-    // --- what a downloader gets: our file after the destination's re-save,
-    // and the untouched photo after the same re-save --------------------------
-    progress('check', 0);
-    const ours = await decodeJpegToPlanes(jpeg);
-    const resDest = (await simulateReencode(ours, profile.check.options)).planes;
-    progress('check', 0.4);
-    const srcDest = (await simulateReencode(this.source.planes, profile.check.options)).planes;
-    progress('check', 0.7);
+      // --- what a downloader gets: our file after the destination's re-save,
+      // and the untouched photo after the same re-save ------------------------
+      progress('check', 0);
+      ours = await decodeJpegToPlanes(jpeg);
+      resDest = (await simulateReencode(ours, profile.check.options)).planes;
+      progress('check', 0.4);
+      if (round === 0) srcDest = (await simulateReencode(this.source.planes, profile.check.options)).planes;
+      progress('check', 0.7);
+      survival = measureSurvival(this.source.planes, srcDest, resDest, findings);
+      const g = survival.fixes.find((f) => f.kind === 'grain');
+      if (round === 0 && g && want > 0 && g.resultOnDest > 0.05 && g.resultOnDest < 0.85 * want) {
+        grainScale = Math.min(2.5, want / g.resultOnDest);
+        progress('regrain', 0);
+        continue;
+      }
+      break;
+    }
     this.storePosted(resDest, srcDest);
 
     // encode error of our own file vs the composed float result
@@ -558,8 +586,6 @@ export class Engine {
     for (let i = 0; i < lumOurs.data.length; i++) sq += (lumOurs.data[i] - lumComp.data[i]) ** 2;
     const encodeRmsLevels = Math.sqrt(sq / lumOurs.data.length) * 255;
     const encodePsnr = psnr(lumComp, lumOurs);
-
-    const survival = measureSurvival(this.source.planes, srcDest, resDest, findings);
     progress('check', 0.85);
 
     // residual periodic components on the downloader's copy
@@ -606,6 +632,7 @@ export class Engine {
       passes: enc.passes,
       stable: enc.stable,
       settled,
+      grainScale,
       checkLabel: profile.check.label,
       survival,
       residual,

@@ -93,6 +93,11 @@ const BASIS: Float64Array[] = NUDGE.map(([v, u]) => {
 export interface SettleOptions {
   /** weight of staying close to the wanted pixels, against boundary smoothness (default 0.5) */
   lambda?: number;
+  /**
+   * the photo's grain, levels: on a clean photo a nudge shows as ripple, so
+   * the fidelity weight rises as (1.5 / grain)² below 1.5 levels of grain
+   */
+  grainLevels?: number;
   /** greedy sweeps over all blocks (default 3) */
   iterations?: number;
   /** boundary steps above this (plane units) are real edges and are not smoothed (default 20 levels) */
@@ -113,7 +118,8 @@ export interface SettleResult {
  * given quality. Pixels outside the whole-block area are left as they are.
  */
 export function settleBlocks(Y: Plane, quality: number, opts: SettleOptions = {}): SettleResult {
-  const lambda = opts.lambda ?? 0.5;
+  const grain = Math.max(0.2, opts.grainLevels ?? 1.5);
+  const lambda = (opts.lambda ?? 0.5) * Math.max(1, (1.5 / grain) ** 2);
   const iterations = opts.iterations ?? 3;
   const maxStep = (opts.maxStep ?? 20 / 255) * 255;
   const { w, h } = Y;
@@ -190,7 +196,7 @@ export function settleBlocks(Y: Plane, quality: number, opts: SettleOptions = {}
   };
 
   // a block whose boundaries are already this smooth is not worth touching
-  const skipBelow = 0.3 * 0.3 * 32;
+  const skipBelow = 0.5 * 0.5 * 32;
   const touched = new Uint8Array(bw * bh);
   for (let it = 0; it < iterations; it++) {
     let changed = 0;

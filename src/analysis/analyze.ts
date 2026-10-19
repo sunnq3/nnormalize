@@ -22,6 +22,7 @@ import {
   type ChromaFinding,
   type Finding,
   type RingingFinding,
+  type GrainFinding,
   type HotPixelFinding,
   type JpegGridFinding,
   type NoiseFinding,
@@ -418,7 +419,34 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       };
       findings.push(rf);
     }
-    mark('ringing', t);
+    t = mark('ringing', t);
+
+    // --- grain put back ------------------------------------------------------
+    // Clean-up leaves smooth areas looking like plastic. A fine photon-like
+    // grain goes back everywhere the photo is smoother than the target: on by
+    // default at the levels that remove grain, available at the others.
+    {
+      const base = nmodel.globalSigma * 255;
+      // about half the photo's own grain, kept between 2 and 3 levels: enough
+      // to come through a quality-75 re-save, not enough to be seen as noise
+      const targetLevels = Math.round(Math.max(2, Math.min(3, base * 0.5)) * 10) / 10;
+      const gf: GrainFinding = {
+        id: 'grain',
+        kind: 'grain',
+        label: 'Put back grain',
+        description: `fine grain of ${targetLevels.toFixed(1)} levels added wherever the cleaned photo is smoother than that`,
+        severity: 0,
+        extent: 1,
+        enabled: level.noiseReduction > 0,
+        confidence: 'high',
+        note: level.noiseReduction > 0 ? '' : 'Off at this level, which keeps the photo’s own grain. Tick it if the result looks too smooth.',
+        strength: 1,
+        method: 'regrain',
+        details: { targetLevels, baseLevels: base, colour: 0.3, seed: 0x97a1 },
+      };
+      findings.push(gf);
+    }
+    mark('grain', t);
   }
   timings.total = Math.round(performance.now() - t0);
 

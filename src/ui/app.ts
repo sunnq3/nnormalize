@@ -682,6 +682,25 @@ export class App {
       });
       box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Remove'), am, av));
     }
+    if (f.kind === 'grain') {
+      const am = el('input', { type: 'range', min: '5', max: '60', value: String(Math.round(f.details.targetLevels * 10)) }) as HTMLInputElement;
+      const av = el('span', { class: 'val' }, `${f.details.targetLevels.toFixed(1)} lv`);
+      am.addEventListener('input', () => (av.textContent = `${(Number(am.value) / 10).toFixed(1)} lv`));
+      am.addEventListener('change', () => {
+        f.details.targetLevels = Number(am.value) / 10;
+        f.enabled = true;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: 'How much grain the photo should end up with everywhere. 1.5 is barely there, 3 is a light film look, 5 is clearly grainy' }, el('span', {}, 'Grain'), am, av));
+      const col = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.colour * 100)) }) as HTMLInputElement;
+      const cv = el('span', { class: 'val' }, `${Math.round(f.details.colour * 100)} %`);
+      col.addEventListener('input', () => (cv.textContent = `${col.value} %`));
+      col.addEventListener('change', () => {
+        f.details.colour = Number(col.value) / 100;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: 'Colour part of the grain, as a share of the brightness part. 0 is pure monochrome grain' }, el('span', {}, 'Colour in it'), col, cv));
+    }
     if (f.kind === 'jpeg-grid') {
       const step = el('input', { type: 'range', min: '2', max: '40', value: String(Math.round(f.details.maxStep * 100)) }) as HTMLInputElement;
       const sv = el('span', { class: 'val' }, `${Math.round(f.details.maxStep * 255)} lv`);
@@ -810,6 +829,9 @@ export class App {
       fact('blue–yellow noise', `${fmt(f.details.sigmaCbLevels, 2)} levels`);
       fact('red–green noise', `${fmt(f.details.sigmaCrLevels, 2)} levels`);
       fact('affected', `${fmt(f.details.fraction * 100, 0)} % of blocks`);
+    } else if (f.kind === 'grain') {
+      fact('photo had', `${fmt(f.details.baseLevels, 2)} levels`);
+      fact('ends up with', `${fmt(f.details.targetLevels, 1)} levels`);
     } else if (f.kind === 'ringing') {
       fact('next to edges', `${fmt(f.details.haloLevels, 2)} levels`);
       fact('elsewhere', `${fmt(f.details.grainLevels, 2)} levels`);
@@ -1050,6 +1072,7 @@ export class App {
     };
     fact('file', `${(r.bytes / 1024).toFixed(0)} kB, quality ${r.quality}, ${r.chroma === '4:4:4' ? 'full colour detail' : 'reduced colour detail'}`);
     if (r.passes > 1) fact('settled', r.stable ? `yes, in ${r.passes} passes: a re-save there reproduces it` : `not fully after ${r.passes} passes`);
+    if (r.grainScale && r.grainScale !== 1) fact('grain put back', `added at ${fmt(r.grainScale, 1)}× the amount set, because the re-save rounds part of it away; the copy carries about the amount set`);
     if (r.settled)
       fact(
         'block edges written on their grid',
@@ -1092,7 +1115,7 @@ export class App {
     this.exportBtn.disabled = true;
     try {
       const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
-        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
+        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^regrain$/, 'writing again with more grain so the copy carries the amount set').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
       );
       if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));

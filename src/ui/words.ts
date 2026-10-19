@@ -31,6 +31,8 @@ export function plainLabel(f: Finding): string {
       return 'Colour blotches';
     case 'ringing':
       return 'Halos next to edges';
+    case 'grain':
+      return 'Put back grain';
   }
 }
 
@@ -66,6 +68,8 @@ export function plainDescription(f: Finding): string {
     }
     case 'ringing':
       return `noise next to hard edges is ${fmt(f.details.ratio, 1)}× the grain elsewhere; this fix smooths the band beside edges by ${Math.round(f.details.amount * 100)} %`;
+    case 'grain':
+      return `fine grain of ${fmt(f.details.targetLevels, 1)} levels added wherever the cleaned photo is smoother than that (the photo had ${fmt(f.details.baseLevels, 1)}), so it doesn't look like plastic`;
   }
 }
 
@@ -96,6 +100,8 @@ export function plainFix(f: Finding): string {
       return 'The colour layer is smoothed where it is blotchy, guided by brightness so colour never bleeds across an edge. Brightness detail is untouched.';
     case 'ringing':
       return 'Only the band next to hard edges is smoothed, with an edge-keeping filter; the edge itself and everything else stay as they are.';
+    case 'grain':
+      return 'Photon-like grain, a little stronger in the shadows and fading out near white, with a touch of colour, is added only where the photo is now smoother than the amount set. Textured areas keep their own detail. Coarse enough to come through a re-save.';
   }
 }
 

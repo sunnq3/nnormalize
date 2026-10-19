@@ -126,13 +126,17 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
       }
       case 'noise': {
         const sig0 = noiseModel(noiseMap(lumS, 32)).globalSigma * 255;
-        const target = f.details.reduction > 0 ? sigS * (1 - f.details.reduction) : sigS;
+        // grain deliberately put back afterwards is not grain that came back
+        const putBack = findings.find((g) => g.kind === 'grain' && g.enabled);
+        const wantBack = putBack && putBack.kind === 'grain' ? putBack.details.targetLevels : 0;
+        const target = f.details.reduction > 0 ? Math.max(sigS * (1 - f.details.reduction), wantBack) : sigS;
         // for levelling (reduction 0) the signature is unevenness; for reduction it is the grain itself
         let retained: number;
         let note: string;
         if (f.details.reduction > 0) {
           retained = sigS > 0.05 ? Math.max(0, Math.min(1, (sigS - sigR) / Math.max(1e-6, sigS - target))) : 1;
-          note = retained >= 0.8 ? 'grain stays reduced.' : retained >= 0.35 ? 'some grain shows again; the re-save adds noise of its own.' : 'the re-save adds about as much noise as was removed.';
+          if (sigS - target < 0.3) retained = 1; // nothing to remove beyond what is put back
+          note = retained >= 0.8 ? (wantBack ? 'grain is reduced, then put back at the amount set.' : 'grain stays reduced.') : retained >= 0.35 ? 'some grain shows again; the re-save adds noise of its own.' : 'the re-save adds about as much noise as was removed.';
         } else {
           retained = 1;
           note = 'levelling only; the re-save adds the same noise everywhere, so evenness is kept.';
@@ -184,6 +188,28 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
           retained,
           verdict: verdictFor(retained),
           note: retained >= 0.8 ? 'edges stay clean.' : 'the re-save puts some halo back next to edges; that is its own ringing.',
+        });
+        break;
+      }
+      case 'grain': {
+        // the grain that comes through: base grain of the downloader's copy against the target
+        const want = f.details.targetLevels;
+        const retained = want > 0.05 ? Math.max(0, Math.min(1, sigR / want)) : 1;
+        const v = retained >= 0.7 ? 'survives' : retained >= 0.35 ? 'partly' : 'lost';
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: f.details.baseLevels,
+          sourceOnDest: sigS,
+          resultOnDest: sigR,
+          retained,
+          verdict: v,
+          note:
+            v === 'survives'
+              ? `the grain comes through at ${sigR.toFixed(1)} levels (${want.toFixed(1)} wanted).`
+              : `the re-save keeps only ${sigR.toFixed(1)} of the ${want.toFixed(1)} levels of grain; raise the amount if the copy looks plastic.`,
         });
         break;
       }
