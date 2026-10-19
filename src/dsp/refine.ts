@@ -17,12 +17,12 @@ export interface Complex {
 }
 
 /** Windowed tile (x·w) as Float64, mean removed before windowing. */
-export function windowedTile(tile: Float64Array, win: Window2D | null, w: number, h: number): Float64Array {
+export function windowedTile(tile: Float64Array, win: Window2D | null, w: number, h: number, out?: Float64Array): Float64Array {
   const n = w * h;
   let mean = 0;
   for (let i = 0; i < n; i++) mean += tile[i];
   mean /= n;
-  const out = new Float64Array(n);
+  out = out ?? new Float64Array(n);
   if (win) for (let i = 0; i < n; i++) out[i] = (tile[i] - mean) * win.data[i];
   else for (let i = 0; i < n; i++) out[i] = tile[i] - mean;
   return out;

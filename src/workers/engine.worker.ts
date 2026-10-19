@@ -59,6 +59,11 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
         post({ type: 'mask', id, w: m.w, h: m.h, data: new Uint8Array(m.data) });
         break;
       }
+      case 'addPeak': {
+        const finding = engine.addPeak(msg.u, msg.v);
+        post({ type: 'finding', id, finding }, transferablesOf(finding));
+        break;
+      }
       case 'render': {
         const result = engine.render(msg.req);
         post({ type: 'render', id, result }, [result.rgba.buffer]);

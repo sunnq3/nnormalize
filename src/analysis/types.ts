@@ -66,6 +66,8 @@ export interface NoiseDetails {
 export interface HotPixelDetails {
   count: number;
   sample: { x: number; y: number; value: number; replacement: number; z: number }[]; // first N for display
+  /** pixel indices (y*w + x) of every detected outlier, for the per-channel fix */
+  indices: Uint32Array;
 }
 
 export interface FindingBase {
@@ -122,6 +124,10 @@ export interface AnalysisOptions {
   noiseBlock: number; // default 32
   noiseThresholdDb: number; // default 3
   linearLight: boolean; // analyse in linear light (sRGB decode)
+  /** peaks whose fitted amplitude is below this (8-bit levels) are left unticked; below half of it they are dropped */
+  minAmplitudeLevels: number; // default 0.5
+  /** verification mode: fewer tiles, no presence maps, no hot-pixel search */
+  quick: boolean;
 }
 
 export const defaultAnalysisOptions: AnalysisOptions = {
@@ -133,6 +139,8 @@ export const defaultAnalysisOptions: AnalysisOptions = {
   noiseBlock: 32,
   noiseThresholdDb: 3,
   linearLight: false,
+  minAmplitudeLevels: 0.5,
+  quick: false,
 };
 
 export interface Analysis {

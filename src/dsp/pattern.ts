@@ -41,10 +41,11 @@ function measureAll(plane: Plane, grid: TileGrid, u: number, v: number, kind: Wi
   const win = window2d(kind, n, n);
   const out: TileMeasure[] = [];
   const tile = new Float64Array(n * n);
+  const tw = new Float64Array(n * n);
   for (const y0 of grid.ys) {
     for (const x0 of grid.xs) {
       extractTile(plane, x0, y0, n, n, tile);
-      const tw = windowedTile(tile, win, n, n);
+      windowedTile(tile, win, n, n, tw);
       const m = measureAt(tw, n, n, win.sum, u, v);
       out.push({ x0, y0, amplitude: m.amplitude, phase: phaseToGlobal(m.phase, u, v, x0, y0), power: m.power });
     }
@@ -57,15 +58,21 @@ export interface MeasureOptions {
   refine?: boolean; // default true
   coherenceThreshold?: number; // default 0.9
   cvThreshold?: number; // default 0.35
+  /** grid for the first (search) pass; defaults to `grid`. A subsampled grid makes the search cheap. */
+  searchGrid?: TileGrid;
+  /** grid for the second (measurement) pass; defaults to `grid`. */
+  measureGrid?: TileGrid;
 }
 
 export function measurePattern(plane: Plane, grid: TileGrid, u0: number, v0: number, opts: MeasureOptions = {}): PatternMeasure {
   const kind = opts.window ?? 'hann';
   const n = grid.size;
   const win = window2d(kind, n, n);
+  const searchGrid = opts.searchGrid ?? grid;
+  const measureGrid = opts.measureGrid ?? grid;
 
   // pass 1: where is it strongest?
-  const first = measureAll(plane, grid, u0, v0, kind);
+  const first = measureAll(plane, searchGrid, u0, v0, kind);
   let bestI = 0;
   for (let i = 1; i < first.length; i++) if (first[i].power > first[bestI].power) bestI = i;
   const best = first[bestI];
@@ -82,7 +89,7 @@ export function measurePattern(plane: Plane, grid: TileGrid, u0: number, v0: num
   const v = refine.v;
 
   // pass 2: amplitude and global phase everywhere at the refined frequency
-  const perTile = measureAll(plane, grid, u, v, kind);
+  const perTile = measureAll(plane, measureGrid, u, v, kind);
 
   const amps = perTile.map((t) => t.amplitude).sort((a, b) => a - b);
   const medianAmp = amps.length & 1 ? amps[amps.length >> 1] : 0.5 * (amps[(amps.length >> 1) - 1] + amps[amps.length >> 1]);
@@ -119,8 +126,8 @@ export function measurePattern(plane: Plane, grid: TileGrid, u0: number, v0: num
     phaseCoherence: coherence,
     amplitudeCv: cv,
     stationary,
-    tilesX: grid.xs.length,
-    tilesY: grid.ys.length,
+    tilesX: measureGrid.xs.length,
+    tilesY: measureGrid.ys.length,
     perTile,
     presence,
     refine,

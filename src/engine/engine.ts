@@ -8,7 +8,9 @@ import { decode as mozDecode } from '@jsquash/jpeg';
 import { analyze } from '../analysis/analyze';
 import { computeDelta } from '../analysis/apply';
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
+import { describeFrequency, measurePattern } from '../dsp/pattern';
 import { lumaPlane, makePlane, type Plane } from '../dsp/plane';
+import type { TileGrid } from '../dsp/tiles';
 import { encodeToJpeg, type JpegExportOptions } from '../io/encode';
 import { decodeImage, type SourceImage, type SourceMeta } from '../io/decode';
 import { parseJpeg } from '../io/jpegParse';
@@ -41,6 +43,7 @@ export class Engine {
   source: SourceImage | null = null;
   analysis: Analysis | null = null;
   layers = new Map<string, Layer>();
+  private manualCount = 0;
   masks = new Map<string, Mask>();
   previewScale = 1;
   pw = 0;
@@ -152,6 +155,65 @@ export class Engine {
     );
     this.analysis = a;
     return a;
+  }
+
+  /** A periodic finding at a user-chosen spectrum position, measured like the rest. */
+  addPeak(u: number, v: number): Finding {
+    if (!this.source || !this.analysis) throw new Error('analyse first');
+    const a = this.analysis;
+    const planes = this.source.planes;
+    const luma = lumaPlane(planes[0], planes[1], planes[2]);
+    const grid: TileGrid = { size: a.tile.size, hop: a.tile.hop, xs: a.tile.xs, ys: a.tile.ys };
+    const m = measurePattern(luma, grid, u, v);
+    const n = a.spectrum.size;
+    const c = n >> 1;
+    const bx = Math.min(n - 1, Math.max(0, Math.round(m.u * n) + c));
+    const by = Math.min(n - 1, Math.max(0, Math.round(m.v * n) + c));
+    const i = by * n + bx;
+    const excessDb = 10 * (a.spectrum.logPower[i] - a.spectrum.background[i]);
+    const z = a.spectrum.z[i];
+    const desc = describeFrequency(m.u, m.v);
+    let extent = 0;
+    for (const p of m.presence) if (p > 0.25) extent++;
+    extent /= m.presence.length;
+    const id = `manual-${this.manualCount++}`;
+    const f: Finding = {
+      id,
+      kind: 'periodic',
+      label: 'Added by hand',
+      description: `${desc.period.toFixed(2)} px period at ${desc.angleDeg.toFixed(1)}°, ${(m.amplitude * 255).toFixed(2)} levels peak, ${excessDb.toFixed(1)} dB over background`,
+      severity: Math.max(0, Math.min(1, (excessDb - 6) / 40)),
+      extent,
+      enabled: true,
+      confidence: z > 8 ? 'medium' : 'low',
+      note: z < 4 ? 'Nothing stands out of the background here; the subtraction will be tiny.' : '',
+      strength: 1,
+      method: m.stationary ? 'parametric' : 'parametric-tiled',
+      details: {
+        u: m.u,
+        v: m.v,
+        period: desc.period,
+        angleDeg: desc.angleDeg,
+        lpi: this.source.meta.dpi ? desc.radius * this.source.meta.dpi : null,
+        amplitude: m.amplitude,
+        phase: m.phase,
+        excessDb,
+        z,
+        widthBins: 2,
+        stationary: m.stationary,
+        coherence: m.phaseCoherence,
+        amplitudeCv: m.amplitudeCv,
+        harmonics: [],
+        presence: m.presence,
+        tilesX: m.tilesX,
+        tilesY: m.tilesY,
+        onAxis: Math.abs(m.u) < 1.2 / n || Math.abs(m.v) < 1.2 / n,
+        jpegGridAligned: false,
+        category: 'moire',
+      },
+    };
+    a.findings.push(f);
+    return f;
   }
 
   // --- layers ----------------------------------------------------------------
@@ -307,7 +369,7 @@ export class Engine {
     const isPreview = region.kind === 'preview';
     const w = region.kind === 'preview' ? this.pw : region.w;
     const h = region.kind === 'preview' ? this.ph : region.h;
-    const rgba = new Uint8ClampedArray(w * h * 4);
+    const rgba = new Uint8ClampedArray(new ArrayBuffer(w * h * 4));
     const chans: Float32Array[] = [];
     const srcChans: Float32Array[] = [];
     for (let c = 0; c < 3; c++) {
@@ -411,15 +473,19 @@ export class Engine {
     const encodeRmsLevels = Math.sqrt(s / lumDec.data.length) * 255;
 
     const info = parseJpeg(jpeg);
-    const a = analyze({ planes, dpi: this.source!.meta.dpi, sourceQuality: options.quality, sourceSubsampling: info.subsampling }, analysisOptions, (st, fr) =>
-      progress('verify:' + st, fr),
+    const a = analyze(
+      { planes, dpi: this.source!.meta.dpi, sourceQuality: options.quality, sourceSubsampling: info.subsampling },
+      { ...analysisOptions, quick: true, maxWelchTiles: 16 },
+      (st, fr) => progress('verify:' + st, fr),
     );
-    const residual = a.findings.filter((f) => f.kind === 'periodic' && f.details.excessDb > budget.maxPeakDb);
+    const residual = a.findings.filter((f) => f.kind === 'periodic' && f.details.excessDb > budget.maxPeakDb && f.details.amplitude * 255 >= budget.minPeakLevels);
     const reasons: string[] = [];
-    if (residual.length) reasons.push(`${residual.length} periodic component${residual.length > 1 ? 's' : ''} still above ${budget.maxPeakDb} dB`);
+    if (residual.length)
+      reasons.push(`${residual.length} periodic component${residual.length > 1 ? 's' : ''} still above ${budget.maxPeakDb} dB and ${budget.minPeakLevels} levels`);
     const bs = Math.max(a.blockGrid.strengthX, a.blockGrid.strengthY);
     if (a.blockGrid.detected && bs > budget.maxBlockStrength) reasons.push(`block grid at ${(bs * 100).toFixed(0)} % exceeds ${(budget.maxBlockStrength * 100).toFixed(0)} %`);
-    if (encodePsnr < budget.minEncodePsnr) reasons.push(`encode error ${encodePsnr.toFixed(1)} dB below ${budget.minEncodePsnr} dB; raise quality`);
+    if (encodePsnr < budget.minEncodePsnr)
+      reasons.push(`encode error ${encodePsnr.toFixed(1)} dB is below ${budget.minEncodePsnr} dB (the encoder discarded fine grain or detail); raise quality to keep more`);
     return {
       encodePsnr,
       encodeRmsLevels,

@@ -77,6 +77,12 @@ export class EngineClient {
     return { w: r.w, h: r.h, data: r.data };
   }
 
+  async addPeak(u: number, v: number): Promise<Finding> {
+    const r = await this.send({ type: 'addPeak', u, v });
+    if (r.type !== 'finding') throw new Error('unexpected reply');
+    return r.finding;
+  }
+
   async render(req: RenderRequest): Promise<RenderResult> {
     const r = await this.send({ type: 'render', req });
     if (r.type !== 'render') throw new Error('unexpected reply');

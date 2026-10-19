@@ -58,6 +58,8 @@ export function subsampleGrid(grid: TileGrid, maxTiles: number): TileGrid {
   return { size: grid.size, hop: grid.hop, xs: pick(grid.xs), ys: pick(grid.ys) };
 }
 
+const n0 = (n: number): number => n;
+
 export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = {}, progress: Progress = () => {}): Analysis {
   const opts: AnalysisOptions = { ...defaultAnalysisOptions, ...optsIn };
   const timings: Record<string, number> = {};
@@ -85,15 +87,22 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
 
   // --- peaks ----------------------------------------------------------------
   progress('peaks', 0);
-  const raw = detectPeaks(model, { zThreshold: opts.zThreshold, minRadiusBins: opts.minRadiusBins, maxPeaks: opts.maxPeaks });
+  const rawAll = detectPeaks(model, { zThreshold: opts.zThreshold, minRadiusBins: opts.minRadiusBins, maxPeaks: opts.maxPeaks });
+  // Welch power of a sinusoid is (A/2)² (within ~1.4 dB off-bin), so the
+  // amplitude is known before any expensive measurement. Peaks below half the
+  // floor are invisible and dropped outright.
+  const floor = opts.minAmplitudeLevels / 255;
+  const raw = rawAll.filter((p) => 2 * Math.sqrt(welch.power[p.by * n0(welch.size) + p.bx]) >= 0.5 * floor);
   const groups = groupHarmonics(raw, welch.size);
   const findings: Finding[] = [];
   const n = welch.size;
   const binTol = 1.2 / n;
+  const quick = opts.quick;
+  const measureOpts = quick ? { searchGrid: welchGrid, measureGrid: welchGrid } : { searchGrid: welchGrid };
   let gi = 0;
   for (const grp of groups) {
     const fundamental: RawPeak = raw[grp.fundamental];
-    const m = measurePattern(luma, grid, fundamental.u, fundamental.v);
+    const m = measurePattern(luma, grid, fundamental.u, fundamental.v, measureOpts);
     const desc = describeFrequency(m.u, m.v);
     const onAxis = Math.abs(m.u) < binTol || Math.abs(m.v) < binTol;
     const near8 = (f: number): boolean => Math.abs(f * 8 - Math.round(f * 8)) < binTol * 8;
@@ -103,7 +112,8 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       .filter((x) => x.order > 1)
       .map(({ idx, order }) => {
         const hp = raw[idx];
-        const hm = measurePattern(luma, grid, hp.u, hp.v, { refine: true });
+        // harmonics only need the refined frequency and a global amplitude
+        const hm = measurePattern(luma, grid, hp.u, hp.v, { refine: true, searchGrid: welchGrid, measureGrid: welchGrid });
         return { order, u: hm.u, v: hm.v, amplitude: hm.amplitude, excessDb: hp.excessDb, widthBins: hp.widthBins };
       });
     let category: PeriodicFinding['details']['category'];
@@ -124,11 +134,13 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       category = 'moire';
       label = 'Moiré / oblique pattern';
     }
-    const severity = Math.max(0, Math.min(1, (fundamental.excessDb - 6) / 40));
-    const strong = fundamental.excessDb >= 12 && fundamental.z >= 8;
+    const severity = Math.max(0, Math.min(1, (fundamental.excessDb - 6) / 40)) * Math.min(1, m.amplitude / (4 * floor));
+    const visible = m.amplitude >= floor;
+    const strong = fundamental.excessDb >= 12 && fundamental.z >= 8 && visible;
     const confidence = fundamental.z > 15 && m.phaseCoherence > 0.6 ? 'high' : fundamental.z >= 8 ? 'medium' : 'low';
     let note = '';
-    if (!strong) note = 'Weak; could be real texture (fabric, screen, brick). Left unticked.';
+    if (!visible) note = `Only ${(m.amplitude * 255).toFixed(2)} levels: below the ${opts.minAmplitudeLevels} level floor, not visible. Left unticked.`;
+    else if (!strong) note = 'Weak; could be real texture (fabric, screen, brick). Left unticked.';
     else if (m.phaseCoherence < 0.4 && !m.stationary) note = 'Varies across the frame; tiled subtraction will follow it.';
 
     let extent = 0;
@@ -188,8 +200,9 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     if (f.kind !== 'periodic' || !f.enabled) continue;
     const orders = [{ u: f.details.u, v: f.details.v }, ...f.details.harmonics.map((hm) => ({ u: hm.u, v: hm.v }))];
     for (const o of orders) {
-      const m = measurePattern(luma, grid, o.u, o.v, { refine: false });
-      const d = m.stationary ? parametricDeltaGlobal(w, h, o.u, o.v, m.amplitude, m.phase) : parametricDeltaTiled(w, h, grid, m);
+      const stationary = f.details.stationary;
+      const m = measurePattern(luma, grid, o.u, o.v, { refine: false, searchGrid: welchGrid, measureGrid: stationary || quick ? welchGrid : grid });
+      const d = stationary || quick ? parametricDeltaGlobal(w, h, o.u, o.v, m.amplitude, m.phase) : parametricDeltaTiled(w, h, grid, m);
       for (let i = 0; i < cleanLuma.data.length; i++) cleanLuma.data[i] += d.data[i];
     }
   }
@@ -308,7 +321,7 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
 
   // --- hot pixels ------------------------------------------------------------
   progress('hotpixels', 0);
-  const hot = findHotPixels(cleanLuma, nmodel);
+  const hot = quick ? { pixels: [], delta: cleanLuma } : findHotPixels(cleanLuma, nmodel);
   if (hot.pixels.length) {
     const hf: HotPixelFinding = {
       id: 'hotpixels',
@@ -322,7 +335,11 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       note: '',
       strength: 1,
       method: 'inpaint',
-      details: { count: hot.pixels.length, sample: hot.pixels.slice(0, 500).map((p) => ({ x: p.x, y: p.y, value: p.value, replacement: p.replacement, z: p.zScore })) },
+      details: {
+        count: hot.pixels.length,
+        sample: hot.pixels.slice(0, 500).map((p) => ({ x: p.x, y: p.y, value: p.value, replacement: p.replacement, z: p.zScore })),
+        indices: Uint32Array.from(hot.pixels, (p) => p.y * w + p.x),
+      },
     };
     findings.push(hf);
   }

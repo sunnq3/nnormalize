@@ -7,11 +7,12 @@
 
 import { deblockDelta } from '../dsp/blocks';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
-import { findHotPixels } from '../dsp/hotpixels';
+import { median9 } from '../dsp/hotpixels';
 import { denoiseDelta, noiseMap, noiseModel, regrainDelta } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
 import { makePlane, type Plane } from '../dsp/plane';
 import type { TileGrid } from '../dsp/tiles';
+import { subsampleGrid } from './analyze';
 import type { Analysis, Finding, PeriodicFinding } from './types';
 
 export type Progress = (fraction: number) => void;
@@ -29,8 +30,10 @@ function periodicDelta(ch: Plane, grid: TileGrid, f: PeriodicFinding, progress: 
     return spectralDelta(ch, grid, targets, { mode: f.method, onProgress: (a, b) => progress(a / b) });
   }
   const out = makePlane(w, h);
+  const sub = subsampleGrid(grid, 36);
   orders.forEach((o, k) => {
-    const m = measurePattern(ch, grid, o.u, o.v, { refine: false });
+    // a stationary pattern needs one amplitude and phase: a subset of tiles is enough
+    const m = measurePattern(ch, grid, o.u, o.v, { refine: false, searchGrid: sub, measureGrid: f.method === 'parametric' ? sub : grid });
     const delta = f.method === 'parametric' ? parametricDeltaGlobal(w, h, o.u, o.v, m.amplitude, m.phase) : parametricDeltaTiled(w, h, grid, m);
     addInto(out, delta);
     progress((k + 1) / orders.length);
@@ -74,9 +77,16 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
         break;
       }
       case 'hotpixels': {
-        const map = noiseMap(ch, 32);
-        const model = noiseModel(map);
-        out.push(findHotPixels(ch, model).delta);
+        // replace each outlier found on the luma by the channel's own 3x3 median
+        const d = makePlane(ch.w, ch.h);
+        const w = ch.w;
+        for (const i of finding.details.indices) {
+          const x = i % w;
+          const y = (i - x) / w;
+          if (x < 1 || y < 1 || x >= w - 1 || y >= ch.h - 1) continue;
+          d.data[i] = median9(ch.data, i, w) - ch.data[i];
+        }
+        out.push(d);
         sub(1);
         break;
       }
