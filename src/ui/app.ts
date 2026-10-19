@@ -509,7 +509,7 @@ export class App {
     if (!this.info) return;
     const t0 = performance.now();
     this.setStatus('Looking for problems…', 0);
-    const stageWords: Record<string, string> = { spectrum: 'what repeats', peaks: 'measuring patterns', noise: 'grain', hotpixels: 'dead pixels' };
+    const stageWords: Record<string, string> = { spectrum: 'what repeats', peaks: 'measuring patterns', noise: 'grain', hotpixels: 'dead pixels', colour: 'colour noise', halos: 'edge halos' };
     const a = await this.client.analyze({ ...this.analysisOptions, level: this.level }, (stage, fr) => this.setStatus(`Looking for problems: ${stageWords[stage] ?? stage}`, fr));
     this.analysis = a;
     this.spectrum.setAnalysis(a, this.info.meta.dpi ?? null);
@@ -672,6 +672,16 @@ export class App {
       });
       box.appendChild(el('div', { class: 'row', title: '0 only levels the grain; higher removes it everywhere' }, el('span', {}, 'Remove grain'), red, rv));
     }
+    if (f.kind === 'chroma' || f.kind === 'ringing') {
+      const am = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.amount * 100)) }) as HTMLInputElement;
+      const av = el('span', { class: 'val' }, `${Math.round(f.details.amount * 100)} %`);
+      am.addEventListener('input', () => (av.textContent = `${am.value} %`));
+      am.addEventListener('change', () => {
+        f.details.amount = Number(am.value) / 100;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Remove'), am, av));
+    }
     if (f.kind === 'jpeg-grid') {
       const step = el('input', { type: 'range', min: '2', max: '40', value: String(Math.round(f.details.maxStep * 100)) }) as HTMLInputElement;
       const sv = el('span', { class: 'val' }, `${Math.round(f.details.maxStep * 255)} lv`);
@@ -796,6 +806,14 @@ export class App {
       fact('count', String(f.details.count));
       const sm = f.details.sample.slice(0, 3).map((p) => `(${p.x}, ${p.y})`).join(' ');
       if (sm) fact('first', sm);
+    } else if (f.kind === 'chroma') {
+      fact('blue–yellow noise', `${fmt(f.details.sigmaCbLevels, 2)} levels`);
+      fact('red–green noise', `${fmt(f.details.sigmaCrLevels, 2)} levels`);
+      fact('affected', `${fmt(f.details.fraction * 100, 0)} % of blocks`);
+    } else if (f.kind === 'ringing') {
+      fact('next to edges', `${fmt(f.details.haloLevels, 2)} levels`);
+      fact('elsewhere', `${fmt(f.details.grainLevels, 2)} levels`);
+      fact('band covers', `${fmt(f.details.bandFraction * 100, 1)} % of pixels`);
     }
     if (st?.rms !== undefined) fact('changes the picture by', `${fmt(st.rms, 2)} levels on average`);
     det.appendChild(facts);

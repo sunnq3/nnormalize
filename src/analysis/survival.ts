@@ -13,6 +13,7 @@
  */
 
 import { detectBlockGrid } from '../dsp/blocks';
+import { measureChromaNoise, measureRinging, toYCbCr } from '../dsp/chroma';
 import { median9 } from '../dsp/hotpixels';
 import { noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
@@ -134,6 +135,52 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
           note = 'levelling only; the re-save adds the same noise everywhere, so evenness is kept.';
         }
         fixes.push({ id: f.id, kind: f.kind, label: f.label, unit: 'levels', source: sig0, sourceOnDest: sigS, resultOnDest: sigR, retained, verdict: verdictFor(retained), note });
+        break;
+      }
+      case 'chroma': {
+        const cn = (p: [Plane, Plane, Plane]): number => {
+          const [Yc, Cb, Cr] = toYCbCr(p[0], p[1], p[2]);
+          const m = measureChromaNoise(Yc, Cb, Cr, 32, f.details.thresholdLevels);
+          return Math.max(m.sigmaCb, m.sigmaCr) * 255;
+        };
+        const c0 = cn(source);
+        const c1 = cn(srcDest);
+        const c2 = cn(resDest);
+        const target = c1 * (1 - f.details.amount);
+        const retained = c1 > 0.05 ? Math.max(0, Math.min(1, (c1 - c2) / Math.max(1e-6, c1 - target))) : 1;
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: c0,
+          sourceOnDest: c1,
+          resultOnDest: c2,
+          retained,
+          verdict: verdictFor(retained),
+          note: retained >= 0.8 ? 'colour stays clean.' : 'some colour noise shows again after the re-save.',
+        });
+        break;
+      }
+      case 'ringing': {
+        const rg = (p: Plane): number => measureRinging(p, f.details.edgeThreshold, 8).haloLevels;
+        const h0 = rg(lumS);
+        const h1 = rg(lumSD);
+        const h2 = rg(lumRD);
+        const target = h1 * (1 - f.details.amount);
+        const retained = h1 > 0.05 ? Math.max(0, Math.min(1, (h1 - h2) / Math.max(1e-6, h1 - target))) : 1;
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: h0,
+          sourceOnDest: h1,
+          resultOnDest: h2,
+          retained,
+          verdict: verdictFor(retained),
+          note: retained >= 0.8 ? 'edges stay clean.' : 'the re-save puts some halo back next to edges; that is its own ringing.',
+        });
         break;
       }
       case 'hotpixels': {

@@ -4,6 +4,7 @@
 
 import { backgroundModel } from '../dsp/background';
 import { detectBlockGrid } from '../dsp/blocks';
+import { measureChromaNoise, measureRinging, toYCbCr } from '../dsp/chroma';
 import { findHotPixels } from '../dsp/hotpixels';
 import { noiseDiscrepancy, noiseFromSpectrum, noiseMap, noiseModel } from '../dsp/noise';
 import { parametricDeltaGlobal, parametricDeltaTiled } from '../dsp/filter';
@@ -18,7 +19,9 @@ import {
   defaultAnalysisOptions,
   type Analysis,
   type AnalysisOptions,
+  type ChromaFinding,
   type Finding,
+  type RingingFinding,
   type HotPixelFinding,
   type JpegGridFinding,
   type NoiseFinding,
@@ -366,7 +369,57 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     };
     findings.push(hf);
   }
-  mark('hotpixels', t);
+  t = mark('hotpixels', t);
+
+  // --- colour blotches ---------------------------------------------------------
+  if (!quick) {
+    progress('colour', 0);
+    const [Yc, Cb, Cr] = toYCbCr(r, g, b);
+    const cn = measureChromaNoise(Yc, Cb, Cr, opts.noiseBlock, 1.0);
+    const lv = Math.max(cn.sigmaCb, cn.sigmaCr) * 255;
+    if (lv >= 0.5 || cn.fraction >= 0.05) {
+      const amount = level.chromaAmount;
+      const cf: ChromaFinding = {
+        id: 'chroma',
+        kind: 'chroma',
+        label: 'Colour noise',
+        description: `colour-layer noise of ${lv.toFixed(1)} levels; ${(cn.fraction * 100).toFixed(0)} % of the photo over 1 level`,
+        severity: Math.min(1, lv / 4),
+        extent: cn.fraction,
+        enabled: amount > 0 && cn.fraction >= 0.05,
+        confidence: cn.fraction >= 0.15 ? 'high' : 'medium',
+        note: amount === 0 ? 'Left alone at the Gentle level.' : cn.fraction < 0.05 ? 'Only traces; left unticked.' : '',
+        strength: 1,
+        method: 'chroma-smooth',
+        details: { sigmaCbLevels: cn.sigmaCb * 255, sigmaCrLevels: cn.sigmaCr * 255, fraction: cn.fraction, thresholdLevels: 1.0, amount: Math.max(amount, 0.6) },
+      };
+      findings.push(cf);
+    }
+    t = mark('chroma', t);
+
+    // --- halos next to edges --------------------------------------------------
+    progress('halos', 0);
+    const rg = measureRinging(cleanLuma, 0.12, 8, nmodel.globalSigma);
+    if (rg.ratio >= 1.5 && rg.haloLevels >= 1.0 && rg.bandFraction >= 0.002) {
+      const amount = level.ringingAmount;
+      const rf: RingingFinding = {
+        id: 'ringing',
+        kind: 'ringing',
+        label: 'Halos next to edges',
+        description: `noise next to hard edges is ${rg.ratio.toFixed(1)}× the grain elsewhere (${rg.haloLevels.toFixed(1)} vs ${rg.grainLevels.toFixed(1)} levels)`,
+        severity: Math.min(1, (rg.ratio - 1) / 3),
+        extent: rg.bandFraction,
+        enabled: amount > 0,
+        confidence: rg.ratio >= 2.5 ? 'high' : 'medium',
+        note: amount === 0 ? 'Left alone at the Gentle level.' : '',
+        strength: 1,
+        method: 'halo-smooth',
+        details: { haloLevels: rg.haloLevels, grainLevels: rg.grainLevels, ratio: rg.ratio, bandFraction: rg.bandFraction, edgeThreshold: rg.edgeThreshold, haloSigma: rg.haloSigma, amount: Math.max(amount, 0.6) },
+      };
+      findings.push(rf);
+    }
+    mark('ringing', t);
+  }
   timings.total = Math.round(performance.now() - t0);
 
   return {

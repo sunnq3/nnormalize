@@ -250,6 +250,12 @@ export function backgroundModel(power: Float64Array, size: number, opts: Backgro
       const onAxis = Math.abs(x - c) <= 1 || Math.abs(y - c) <= 1;
       const s = Math.max(ringSigma[radius[i]], onAxis ? axisSigma : 0);
       z[i] = (residual[i] - med) / s;
+      // The axis sigma is inflated by the ripple that a few straight edges
+      // leave along the ridge (edges D apart modulate it with period n/D).
+      // That ripple stays within ~8 dB of the running median; a narrow
+      // excess of 12 dB or more on the axis is a real line pattern and is
+      // judged against the ring's own sigma like any other bin.
+      if (onAxis && residual[i] - med >= 1.2) z[i] = Math.max(z[i], (residual[i] - med) / ringSigma[radius[i]]);
     }
   }
 

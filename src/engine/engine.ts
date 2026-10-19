@@ -21,7 +21,7 @@ import type { Budget, LayerSetting, LayerStats, LoadedInfo, RenderRequest, Rende
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
 /** Order in which correction stages are applied; later stages are computed on earlier ones. */
-export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, noise: 3 };
+export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, noise: 4, chroma: 5 };
 
 /** Findings in the order their layers should be built. */
 export function stageSorted<T extends { kind: Finding['kind'] }>(findings: T[]): T[] {

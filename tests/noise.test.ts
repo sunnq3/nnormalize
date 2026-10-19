@@ -34,7 +34,7 @@ describe('noise estimation', () => {
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y * w + x;
-        if (y < h / 3) noisy.data[i] += 0.03 * g();
+        if (y < h / 3) noisy.data[i] += 0.018 * g();
         else if (y > (2 * h) / 3) noisy.data[i] = clean.data[i];
       }
     }

@@ -1,13 +1,12 @@
 /**
  * Noise analysis and normalisation.
  *
- * The estimator is the classic Laplacian one: convolve with
- *   [ 1 -2  1 ]
- *   [-2  4 -2 ]
- *   [ 1 -2  1 ]
- * whose response to white noise of sigma s has standard deviation 6 s, and
- * take a robust (MAD) scale of the response in each block so edges and
- * texture, which are sparse, don't inflate it the way a mean would.
+ * Grain is measured as the robust (MAD) scale of the residual after a 5×5
+ * box blur, per block. That residual holds everything finer than about four
+ * pixels, which is where the grain of a JPEG lives: the encoder zeroes the
+ * very finest frequencies, so a pixel-scale (Laplacian) estimate reads a
+ * compressed photo as almost noise-free while its grain is plainly visible.
+ * For white noise of sigma s the residual's sigma is s·sqrt(24/25).
  */
 
 import { makePlane, type Plane } from './plane';
@@ -19,41 +18,344 @@ export interface NoiseMap {
   bh: number; // blocks down
   sigma: Float32Array; // per-block noise sigma, plane units
   mean: Float32Array; // per-block mean intensity
+  /**
+   * How much of the block's fine detail is organised rather than random, 0..1:
+   * edges and oriented texture (aligned gradients), fine texture far above the
+   * photo's grain, and fine detail whose spatial correlation differs from the
+   * grain's. The smoother is held back in proportion to this.
+   */
+  texture: Float32Array;
+  /** the photo's base grain at each of 16 brightness bins (plane units) */
+  ref: Float32Array;
+  /** the photo's base grain overall (plane units) */
+  refSigma: number;
+}
+
+export interface GrainCluster {
+  ref: number; // median sigma of the cluster
+  lo: number;
+  hi: number;
+  share: number; // fraction of the blocks given
+}
+
+/**
+ * Distinct clusters of block sigmas (windows of ×1.35), largest first by
+ * greedy extraction, returned sorted by sigma. Sorted input.
+ */
+export function grainClusters(sorted: number[], minShare = 0.12): GrainCluster[] {
+  const n = sorted.length;
+  const out: GrainCluster[] = [];
+  if (n < 4) return out;
+  const span = 1.35;
+  const taken = new Uint8Array(n);
+  for (;;) {
+    let bestI = -1;
+    let bestC = 0;
+    let j = 0;
+    for (let i = 0; i < n; i++) {
+      if (taken[i]) continue;
+      if (j < i) j = i;
+      while (j < n && sorted[j] <= sorted[i] * span) j++;
+      let c = 0;
+      for (let t = i; t < j; t++) if (!taken[t]) c++;
+      if (c > bestC) {
+        bestC = c;
+        bestI = i;
+      }
+    }
+    if (bestI < 0 || bestC < Math.max(4, minShare * n)) break;
+    const members: number[] = [];
+    for (let t = bestI; t < n && sorted[t] <= sorted[bestI] * span; t++) {
+      if (!taken[t]) {
+        taken[t] = 1;
+        members.push(sorted[t]);
+      }
+    }
+    out.push({ ref: members[members.length >> 1], lo: members[0], hi: members[members.length - 1], share: members.length / n });
+  }
+  return out.sort((a, b) => a.ref - b.ref);
+}
+
+/**
+ * The base grain of a set of block sigmas: the lowest cluster that holds a
+ * substantial share (40 % of the largest). Blocks that were smoothed earlier
+ * form a cluster near zero (excluded by the caller's floor); fine texture
+ * forms clusters above the grain and is ignored unless it is nearly all
+ * there is.
+ */
+export function baseGrain(sorted: number[]): GrainCluster | null {
+  const cl = grainClusters(sorted);
+  if (!cl.length) return null;
+  let max = 0;
+  for (const c of cl) max = Math.max(max, c.share);
+  for (const c of cl) if (c.share >= 0.4 * max) return c;
+  return cl[0];
+}
+
+/**
+ * The base grain within one brightness bin given the photo's overall base
+ * grain B: of the clusters within ×3 of B, the one that is both close to B
+ * and well populated (cost = 3·|ln(ref/B)| − ln share). A bin with none
+ * there holds only texture or smoothed blocks at that brightness, and gets
+ * its grain from the neighbouring bins instead (null).
+ */
+export function binGrain(sorted: number[], B: number): GrainCluster | null {
+  const cl = grainClusters(sorted);
+  if (!cl.length) return null;
+  let best: GrainCluster | null = null;
+  let bestCost = Infinity;
+  for (const c of cl) {
+    const r = c.ref / B;
+    if (r < 1 / 3 || r > 3) continue;
+    const cost = 3 * Math.abs(Math.log(r)) - Math.log(c.share);
+    if (cost < bestCost) {
+      bestCost = cost;
+      best = c;
+    }
+  }
+  return best;
 }
 
 export function noiseMap(p: Plane, block = 32): NoiseMap {
   const { w, h } = p;
   const bw = Math.max(1, Math.floor(w / block));
   const bh = Math.max(1, Math.floor(h / block));
-  const sigma = new Float32Array(bw * bh);
-  const mean = new Float32Array(bw * bh);
+  const nb = bw * bh;
+  const sigma = new Float32Array(nb);
+  const gMed = new Float32Array(nb); // median gradient magnitude of the lightly smoothed block
+  const mean = new Float32Array(nb);
+  const texture = new Float32Array(nb);
+  const structure = new Float32Array(nb);
+  const corr = [new Float32Array(nb), new Float32Array(nb), new Float32Array(nb), new Float32Array(nb)]; // lag-1 x, lag-1 y, lag-2 x, lag-2 y of the fine residual
   const d = p.data;
   const buf = new Float64Array(block * block);
+  const buf2 = new Float64Array(block * block);
+
+  // lightly smoothed copy for the structure test: a 3x3 box cuts noise
+  // gradients while edges keep most of theirs
+  const sm = boxBlur(d, w, h, 1);
+  const gx = new Float32Array(w * h);
+  const gy = new Float32Array(w * h);
+  const gmag = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      gx[i] = 0.5 * (sm[i + 1] - sm[i - 1]);
+      gy[i] = 0.5 * (sm[i + w] - sm[i - w]);
+      gmag[i] = Math.hypot(gx[i], gy[i]);
+    }
+  }
+
+  const box5 = boxBlur(d, w, h, 2);
+  const resid = new Float32Array(w * h);
+  for (let i = 0; i < resid.length; i++) resid[i] = d[i] - box5[i];
+  const residScale = 1.4826 / Math.sqrt(24 / 25);
   for (let by = 0; by < bh; by++) {
     for (let bx = 0; bx < bw; bx++) {
       const x0 = bx * block;
       const y0 = by * block;
       let n = 0;
       let m = 0;
-      const y1 = Math.min(h - 1, y0 + block);
-      const x1 = Math.min(w - 1, x0 + block);
-      for (let y = Math.max(1, y0); y < y1; y++) {
-        for (let x = Math.max(1, x0); x < x1; x++) {
+      let s2 = 0;
+      const sl = [0, 0, 0, 0];
+      const y1 = Math.min(h - 2, y0 + block);
+      const x1 = Math.min(w - 2, x0 + block);
+      for (let y = Math.max(2, y0); y < y1; y++) {
+        for (let x = Math.max(2, x0); x < x1; x++) {
           const i = y * w + x;
-          const l =
-            d[i - w - 1] - 2 * d[i - w] + d[i - w + 1] - 2 * d[i - 1] + 4 * d[i] - 2 * d[i + 1] + d[i + w - 1] - 2 * d[i + w] + d[i + w + 1];
-          buf[n++] = Math.abs(l);
+          const r = resid[i];
+          buf[n] = Math.abs(r);
+          buf2[n] = gmag[i];
+          n++;
           m += d[i];
+          s2 += r * r;
+          if (x + 1 < x1) sl[0] += r * resid[i + 1];
+          if (y + 1 < y1) sl[1] += r * resid[i + w];
+          if (x + 2 < x1) sl[2] += r * resid[i + 2];
+          if (y + 2 < y1) sl[3] += r * resid[i + 2 * w];
         }
       }
+      const k = by * bw + bx;
       const seg = buf.subarray(0, n);
       seg.sort();
       const med = n ? (n & 1 ? seg[n >> 1] : 0.5 * (seg[(n >> 1) - 1] + seg[n >> 1])) : 0;
-      sigma[by * bw + bx] = (1.4826 * med) / 6;
-      mean[by * bw + bx] = n ? m / n : 0;
+      sigma[k] = residScale * med;
+      const seg2 = buf2.subarray(0, n);
+      seg2.sort();
+      gMed[k] = n ? seg2[n >> 1] : 0;
+      mean[k] = n ? m / n : 0;
+      for (let l = 0; l < 4; l++) corr[l][k] = s2 > 1e-12 ? sl[l] / s2 : 0;
     }
   }
-  return { block, bw, bh, sigma, mean };
+
+  const bins = 16;
+  const binOf = (k: number): number => Math.min(bins - 1, Math.max(0, Math.floor(mean[k] * bins)));
+  const all = Array.from(sigma).sort((a, c) => a - c);
+  const medianAll = all.length ? all[all.length >> 1] : 0;
+  const sorted = (l: number[]): number[] => l.sort((a, c) => a - c);
+
+  // First pass at the base grain from the sigmas alone, to learn how steep
+  // this photo's grain is: the ratio of a block's median gradient to its
+  // sigma, which depends on the grain's spectrum (compression reddens it).
+  const base0 = lowestSubstantial(grainClusters(sorted(Array.from(sigma))), 0.5 / 255) ?? { ref: medianAll, lo: medianAll / 1.35, hi: medianAll * 1.35, share: 1 };
+  const ratios: number[] = [];
+  for (let k = 0; k < nb; k++) if (sigma[k] > 1e-6 && sigma[k] >= base0.lo && sigma[k] <= base0.hi) ratios.push(gMed[k] / sigma[k]);
+  ratios.sort((a, c) => a - c);
+  const gradPerSigma = ratios.length ? ratios[ratios.length >> 1] : 0.3;
+
+  // structure: pixels whose smoothed gradient is far above what noise of this
+  // block's own strength produces (at least the photo's grain, so a block
+  // smoothed earlier does not count its gentle gradients), and how aligned
+  // those pixels are. Noise alone leaves ~0.02 % of pixels above 3.5× the
+  // median gradient; an edge or a weave leaves many more, and aligned.
+  for (let by = 0; by < bh; by++) {
+    for (let bx = 0; bx < bw; bx++) {
+      const k = by * bw + bx;
+      const gT = 3.5 * gradPerSigma * Math.max(sigma[k], base0.ref);
+      let edges = 0;
+      let cnt = 0;
+      let jxx = 0;
+      let jyy = 0;
+      let jxy = 0;
+      const y1 = Math.min(h - 1, by * block + block);
+      const x1 = Math.min(w - 1, bx * block + block);
+      for (let y = Math.max(1, by * block); y < y1; y++) {
+        for (let x = Math.max(1, bx * block); x < x1; x++) {
+          const i = y * w + x;
+          cnt++;
+          if (gmag[i] > gT) {
+            edges++;
+            jxx += gx[i] * gx[i];
+            jyy += gy[i] * gy[i];
+            jxy += gx[i] * gy[i];
+          }
+        }
+      }
+      const density = cnt ? edges / cnt : 0;
+      const tr = jxx + jyy;
+      const coh = tr > 1e-12 && density > 0.02 ? ((jxx - jyy) ** 2 + 4 * jxy * jxy) / (tr * tr) : 0;
+      structure[k] = Math.min(1, Math.max(coh * 2.5 * Math.min(1, density / 0.05), (density - 0.03) / 0.12, 0));
+    }
+  }
+
+  // A reference curve (grain per brightness bin) from a set of blocks, each
+  // bin's cluster chosen near the pooled base B, gaps filled from the nearest
+  // bin and the curve smoothed with a 3-bin median.
+  const curveFrom = (use: (k: number) => boolean, B: number): Float32Array => {
+    const lists: number[][] = Array.from({ length: bins }, () => []);
+    for (let k = 0; k < nb; k++) if (use(k)) lists[binOf(k)].push(sigma[k]);
+    const ref = new Float32Array(bins);
+    const have = new Uint8Array(bins);
+    for (let b = 0; b < bins; b++) {
+      const c = lists[b].length >= 6 ? binGrain(sorted(lists[b]), B) : null;
+      if (c) {
+        ref[b] = c.ref;
+        have[b] = 1;
+      }
+    }
+    for (let b = 0; b < bins; b++) {
+      if (have[b]) continue;
+      let best = -1;
+      let bestD = Infinity;
+      for (let c = 0; c < bins; c++) {
+        if (have[c] && Math.abs(c - b) < bestD) {
+          bestD = Math.abs(c - b);
+          best = c;
+        }
+      }
+      ref[b] = best >= 0 ? ref[best] : B;
+    }
+    const sm = new Float32Array(ref);
+    for (let b = 1; b < bins - 1; b++) {
+      const a = ref[b - 1];
+      const c = ref[b];
+      const e = ref[b + 1];
+      sm[b] = Math.max(Math.min(a, c), Math.min(Math.max(a, c), e));
+    }
+    return sm;
+  };
+
+  // Pass one: the base grain is the lowest substantial cluster of the
+  // structure-free blocks (at least 0.5 levels, so a border or a flattened
+  // sky is not it), which is the grain even when most of the photo is fine
+  // texture. What the grain looks like (its spatial correlation) is read
+  // from the lowest substantial cluster of at least 1 level, where there is
+  // grain enough to have a shape.
+  const plain = (k: number): boolean => structure[k] < 0.2;
+  const sf: number[] = [];
+  for (let k = 0; k < nb; k++) if (plain(k)) sf.push(sigma[k]);
+  const clusters1 = grainClusters(sorted(sf));
+  const fallback = { ref: medianAll, lo: medianAll / 1.35, hi: medianAll * 1.35, share: 1 };
+  const B1 = lowestSubstantial(clusters1, 0.5 / 255) ?? largest(clusters1) ?? fallback;
+  const cRef = lowestSubstantial(clusters1, 1.0 / 255) ?? B1;
+  const ref1 = curveFrom(plain, B1.ref);
+  const cl: number[][] = [[], [], [], []];
+  for (let k = 0; k < nb; k++) {
+    if (!plain(k) || sigma[k] < cRef.lo || sigma[k] > cRef.hi) continue;
+    for (let l = 0; l < 4; l++) cl[l].push(corr[l][k]);
+  }
+  const c0 = cl.map((l) => {
+    sorted(l);
+    return l.length ? l[l.length >> 1] : 0;
+  });
+
+  for (let k = 0; k < nb; k++) {
+    const r0 = Math.max(1e-5, ref1[binOf(k)]);
+    const ratio = sigma[k] / r0;
+    // Sensor noise is consistent at a given brightness within one photo, but
+    // a patch can be several times grainier after local processing, and
+    // compression lets strong grain through more than weak. Only blocks far
+    // above the base grain are called texture on strength alone.
+    const far = Math.min(1, Math.max(0, (ratio - 6) / 4));
+    // Fine detail above the grain that is more correlated from pixel to pixel
+    // than the grain is organised (sand, foliage, fabric): noise that is
+    // merely stronger comes through compression whiter, never redder.
+    let dc = 0;
+    for (let l = 0; l < 4; l++) dc = Math.max(dc, corr[l][k] - Math.max(0, c0[l]));
+    const corrTex = Math.min(1, Math.max(0, (dc - 0.05) / 0.1)) * Math.min(1, Math.max(0, (ratio - 1.3) / 0.5));
+    texture[k] = Math.max(structure[k], far, corrTex);
+  }
+
+  // Pass two: with texture known, the grain the photo has is read from the
+  // plain blocks: the lowest substantial cluster, unless a clearly larger
+  // one lies nearby (a flattened sky next to a grainier rest, say, where the
+  // rest is the photo's grain). Grainier patches sit above it and smoother
+  // ones below.
+  const plain2 = (k: number): boolean => structure[k] < 0.2 && texture[k] < 0.3;
+  const sf2: number[] = [];
+  for (let k = 0; k < nb; k++) if (plain2(k)) sf2.push(sigma[k]);
+  let B2: GrainCluster = B1;
+  let bestCost = Infinity;
+  for (const c of grainClusters(sorted(sf2))) {
+    const cost = 0.65 * Math.abs(Math.log(c.ref / Math.max(1e-6, B1.ref))) - Math.log(c.share);
+    if (cost < bestCost) {
+      bestCost = cost;
+      B2 = c;
+    }
+  }
+  const ref2 = curveFrom(plain2, B2.ref);
+  if (NOISE_DEBUG) NOISE_DEBUG({ sigma, gMed, gradPerSigma, structure, texture, ref: ref2, ref1, corr, c0, B1, B2, mean });
+  return { block, bw, bh, sigma, mean, texture, ref: ref2, refSigma: B2.ref };
+}
+
+/** The lowest cluster at or above `minRef` holding at least 40 % of what the largest holds. */
+function lowestSubstantial(cl: GrainCluster[], minRef: number): GrainCluster | null {
+  let max = 0;
+  for (const c of cl) max = Math.max(max, c.share);
+  for (const c of cl) if (c.ref >= minRef && c.share >= 0.4 * max) return c;
+  return null;
+}
+
+/** The cluster with the largest share (the lower one on a tie). */
+function largest(cl: GrainCluster[]): GrainCluster | null {
+  let best: GrainCluster | null = null;
+  for (const c of cl) if (!best || c.share > best.share) best = c;
+  return best;
+}
+
+export let NOISE_DEBUG: ((d: Record<string, unknown>) => void) | null = null;
+export function setNoiseDebug(fn: typeof NOISE_DEBUG): void {
+  NOISE_DEBUG = fn;
 }
 
 export interface NoiseModel {
@@ -63,41 +365,13 @@ export interface NoiseModel {
   globalSigma: number; // median block sigma
 }
 
-/** Expected noise as a function of intensity: a robust per-bin median of the block sigmas. */
-export function noiseModel(map: NoiseMap, bins = 16): NoiseModel {
-  const lists: number[][] = Array.from({ length: bins }, () => []);
-  const all: number[] = [];
-  for (let i = 0; i < map.sigma.length; i++) {
-    const b = Math.min(bins - 1, Math.max(0, Math.floor(map.mean[i] * bins)));
-    lists[b].push(map.sigma[i]);
-    all.push(map.sigma[i]);
-  }
-  all.sort((a, b) => a - b);
-  const globalSigma = all.length ? all[all.length >> 1] : 0;
-  const curve = new Float32Array(bins);
-  const have = new Uint8Array(bins);
-  for (let b = 0; b < bins; b++) {
-    const l = lists[b];
-    if (l.length >= 4) {
-      l.sort((a, c) => a - c);
-      curve[b] = l[l.length >> 1];
-      have[b] = 1;
-    }
-  }
-  // fill gaps from the nearest populated bin
-  for (let b = 0; b < bins; b++) {
-    if (have[b]) continue;
-    let best = -1;
-    let bestD = Infinity;
-    for (let c = 0; c < bins; c++) {
-      if (have[c] && Math.abs(c - b) < bestD) {
-        bestD = Math.abs(c - b);
-        best = c;
-      }
-    }
-    curve[b] = best >= 0 ? curve[best] : globalSigma;
-  }
-  return { bins, curve, globalSigma };
+/**
+ * Expected noise as a function of intensity: the photo's base grain per
+ * brightness bin as the noise map measured it (texture and smoothed regions
+ * left out), with the overall base grain as globalSigma.
+ */
+export function noiseModel(map: NoiseMap): NoiseModel {
+  return { bins: map.ref.length, curve: new Float32Array(map.ref), globalSigma: map.refSigma };
 }
 
 export function expectedSigma(model: NoiseModel, intensity: number): number {
@@ -227,11 +501,13 @@ export interface NoiseNormaliseOptions {
 }
 
 /**
- * Denoise toward the model where blocks are noisier than expected. Two guided
- * filters of increasing strength are tried; for each block the weakest one
- * that can reach the expected sigma is blended in by exactly the amount that
- * lands there, measured rather than assumed. Returns a delta plane and the
- * total blend map (0..1) that was used.
+ * Denoise toward the model where blocks are noisier than expected. Five
+ * guided filters of increasing strength are tried; for each block the
+ * weakest one that can reach the expected sigma is blended in by exactly the
+ * amount that lands there, measured rather than assumed. Blocks with texture
+ * are only ever given the weakest filters (which take grain-scale variation
+ * and keep anything with more contrast than the grain), and less of them.
+ * Returns a delta plane and the total blend map (0..1) that was used.
  */
 export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: NoiseNormaliseOptions = {}): { delta: Plane; blend: Plane } {
   const thr = opts.thresholdDb ?? 1.5;
@@ -242,7 +518,7 @@ export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: N
   let any = false;
   for (let i = 0; i < nBlocks; i++) {
     const e = Math.max(1e-6, expectedSigma(model, map.mean[i]) * scale);
-    if (20 * Math.log10(Math.max(1e-6, map.sigma[i]) / e) > thr) {
+    if (map.texture[i] < 0.95 && 20 * Math.log10(Math.max(1e-6, map.sigma[i]) / e) > thr) {
       need[i] = 1;
       any = true;
     }
@@ -259,6 +535,9 @@ export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: N
     { r: r + 3, eps: (30 * g) ** 2 + 1e-8 },
     { r: r + 5, eps: (60 * g) ** 2 + 1e-8 },
   ];
+  // the strongest candidate a block may use: everything for plain grain, the
+  // two weakest where some texture shows, only the weakest where it is clear
+  const cap = (t: number): number => (t < 0.3 ? candidates.length - 1 : t < 0.7 ? 1 : 0);
   const remaining = new Uint8Array(need);
   for (let ci = 0; ci < candidates.length; ci++) {
     let left = 0;
@@ -268,16 +547,15 @@ export function denoiseDelta(p: Plane, map: NoiseMap, model: NoiseModel, opts: N
     const f = guidedFilter(p, cand.r, cand.eps);
     const fmap = noiseMap(f, map.block);
     const b = new Float32Array(nBlocks);
-    const last = ci === candidates.length - 1;
     for (let i = 0; i < nBlocks; i++) {
       if (!remaining[i]) continue;
       const e = Math.max(1e-6, expectedSigma(model, map.mean[i]) * scale);
       const s0 = map.sigma[i];
       const sf = fmap.sigma[i];
-      if (sf <= e || last) {
+      if (sf <= e || ci >= cap(map.texture[i])) {
         // noise of I + b(f - I) ≈ (1-b)·s0 + b·sf  (the two are correlated)
         const bb = s0 - sf > 1e-9 ? (s0 - e) / (s0 - sf) : 1;
-        b[i] = Math.min(1, Math.max(0, bb));
+        b[i] = Math.min(1, Math.max(0, bb)) * (1 - map.texture[i]) ** 2;
         blendTotal[i] = Math.max(blendTotal[i], b[i]);
         remaining[i] = 0;
       }

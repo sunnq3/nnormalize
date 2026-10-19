@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels';
+export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth';
 
 export interface HarmonicInfo {
   order: number;
@@ -72,6 +72,25 @@ export interface NoiseDetails {
   reduction: number;
 }
 
+export interface ChromaDetails {
+  sigmaCbLevels: number;
+  sigmaCrLevels: number;
+  fraction: number; // of blocks over the threshold
+  thresholdLevels: number;
+  amount: number; // 0..1 of the colour noise to remove where present
+}
+
+export interface RingingDetails {
+  haloLevels: number;
+  grainLevels: number;
+  ratio: number;
+  bandFraction: number;
+  edgeThreshold: number;
+  /** the smoother's strength, plane units */
+  haloSigma: number;
+  amount: number; // 0..1
+}
+
 export interface HotPixelDetails {
   count: number;
   sample: { x: number; y: number; value: number; replacement: number; z: number }[]; // first N for display
@@ -114,7 +133,18 @@ export interface HotPixelFinding extends FindingBase {
   details: HotPixelDetails;
 }
 
-export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding;
+export interface ChromaFinding extends FindingBase {
+  kind: 'chroma';
+  method: 'chroma-smooth';
+  details: ChromaDetails;
+}
+export interface RingingFinding extends FindingBase {
+  kind: 'ringing';
+  method: 'halo-smooth';
+  details: RingingDetails;
+}
+
+export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding;
 
 export interface SpectrumView {
   size: number;
@@ -154,13 +184,17 @@ export interface LevelProfile {
   deblockSpan: 4 | 8;
   deblockAlwaysOn: boolean;
   enableWeakPeaks: boolean;
+  /** fraction of colour-blotch noise to remove where it is present (0 = off) */
+  chromaAmount: number;
+  /** fraction of edge-halo noise to remove where edges carry extra noise (0 = off) */
+  ringingAmount: number;
 }
 
 export const LEVELS: Record<CleanupLevel, LevelProfile> = {
-  gentle: { zThreshold: 7, minAmplitudeLevels: 1, noiseThresholdDb: 4, noiseReduction: 0, noiseAlwaysOn: false, deblockMaxStep: 0.06, deblockActivityRatio: 1.8, deblockSpan: 4, deblockAlwaysOn: false, enableWeakPeaks: false },
-  standard: { zThreshold: 6, minAmplitudeLevels: 0.5, noiseThresholdDb: 3, noiseReduction: 0, noiseAlwaysOn: false, deblockMaxStep: 0.08, deblockActivityRatio: 1.5, deblockSpan: 4, deblockAlwaysOn: false, enableWeakPeaks: false },
-  strong: { zThreshold: 5, minAmplitudeLevels: 0.3, noiseThresholdDb: 2, noiseReduction: 0.5, noiseAlwaysOn: true, deblockMaxStep: 0.15, deblockActivityRatio: 1.2, deblockSpan: 8, deblockAlwaysOn: true, enableWeakPeaks: true },
-  maximum: { zThreshold: 4.5, minAmplitudeLevels: 0.2, noiseThresholdDb: 1.5, noiseReduction: 0.8, noiseAlwaysOn: true, deblockMaxStep: 0.25, deblockActivityRatio: 1.0, deblockSpan: 8, deblockAlwaysOn: true, enableWeakPeaks: true },
+  gentle: { zThreshold: 7, minAmplitudeLevels: 1, noiseThresholdDb: 4, noiseReduction: 0, noiseAlwaysOn: false, deblockMaxStep: 0.06, deblockActivityRatio: 1.8, deblockSpan: 4, deblockAlwaysOn: false, enableWeakPeaks: false, chromaAmount: 0, ringingAmount: 0 },
+  standard: { zThreshold: 6, minAmplitudeLevels: 0.5, noiseThresholdDb: 3, noiseReduction: 0, noiseAlwaysOn: false, deblockMaxStep: 0.08, deblockActivityRatio: 1.5, deblockSpan: 4, deblockAlwaysOn: false, enableWeakPeaks: false, chromaAmount: 0.6, ringingAmount: 0.6 },
+  strong: { zThreshold: 5, minAmplitudeLevels: 0.3, noiseThresholdDb: 2, noiseReduction: 0.5, noiseAlwaysOn: true, deblockMaxStep: 0.15, deblockActivityRatio: 1.2, deblockSpan: 8, deblockAlwaysOn: true, enableWeakPeaks: true, chromaAmount: 0.8, ringingAmount: 0.8 },
+  maximum: { zThreshold: 4.5, minAmplitudeLevels: 0.2, noiseThresholdDb: 1.5, noiseReduction: 0.8, noiseAlwaysOn: true, deblockMaxStep: 0.25, deblockActivityRatio: 1.0, deblockSpan: 8, deblockAlwaysOn: true, enableWeakPeaks: true, chromaAmount: 0.9, ringingAmount: 0.9 },
 };
 
 export const defaultAnalysisOptions: AnalysisOptions = {

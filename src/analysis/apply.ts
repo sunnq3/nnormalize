@@ -6,6 +6,7 @@
  */
 
 import { deblockDelta } from '../dsp/blocks';
+import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr } from '../dsp/chroma';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
 import { median9 } from '../dsp/hotpixels';
 import { denoiseDelta, noiseMap, noiseModel, regrainDelta } from '../dsp/noise';
@@ -16,6 +17,13 @@ import { subsampleGrid } from './analyze';
 import type { Analysis, Finding, PeriodicFinding } from './types';
 
 export type Progress = (fraction: number) => void;
+
+function lumaOf(planes: [Plane, Plane, Plane]): Plane {
+  const n = planes[0].w * planes[0].h;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = 0.299 * planes[0].data[i] + 0.587 * planes[1].data[i] + 0.114 * planes[2].data[i];
+  return { w: planes[0].w, h: planes[0].h, data: out };
+}
 
 function addInto(dst: Plane, src: Plane): void {
   for (let i = 0; i < dst.data.length; i++) dst.data[i] += src.data[i];
@@ -44,6 +52,42 @@ function periodicDelta(ch: Plane, grid: TileGrid, f: PeriodicFinding, progress: 
 export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, finding: Finding, progress: Progress = () => {}): [Plane, Plane, Plane] {
   const grid: TileGrid = { size: analysis.tile.size, hop: analysis.tile.hop, xs: analysis.tile.xs, ys: analysis.tile.ys };
   const out: Plane[] = [];
+
+  // corrections that work on the colour layer or need the luminance of all
+  // three channels at once
+  if (finding.kind === 'chroma') {
+    const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);
+    progress(0.2);
+    const cn = measureChromaNoise(Y, Cb, Cr, 32, finding.details.thresholdLevels);
+    const { dCb, dCr } = chromaDelta(Cb, Cr, cn, finding.details.amount, finding.details.thresholdLevels);
+    progress(0.8);
+    // delta in RGB: convert (Y, Cb+dCb, Cr+dCr) back and subtract the input
+    const Cb2 = { w: Cb.w, h: Cb.h, data: new Float32Array(Cb.data) };
+    const Cr2 = { w: Cr.w, h: Cr.h, data: new Float32Array(Cr.data) };
+    for (let i = 0; i < Cb2.data.length; i++) {
+      Cb2.data[i] += dCb.data[i];
+      Cr2.data[i] += dCr.data[i];
+    }
+    const rgb = toRGB(Y, Cb2, Cr2);
+    const deltas = rgb.map((p, c) => {
+      const d = makePlane(p.w, p.h);
+      for (let i = 0; i < d.data.length; i++) d.data[i] = p.data[i] - planes[c].data[i];
+      return d;
+    });
+    progress(1);
+    return deltas as [Plane, Plane, Plane];
+  }
+  if (finding.kind === 'ringing') {
+    const Y = lumaOf(planes);
+    const { halo } = haloBand(Y, finding.details.edgeThreshold, 8);
+    const haloSigma = finding.details.haloSigma ?? finding.details.haloLevels / 255;
+    const deltas = planes.map((p, c) => {
+      const d = ringingDelta(p, halo, haloSigma, finding.details.amount);
+      progress((c + 1) / 3);
+      return d;
+    });
+    return deltas as [Plane, Plane, Plane];
+  }
   planes.forEach((ch, ci) => {
     const sub = (fr: number): void => progress((ci + fr) / 3);
     switch (finding.kind) {

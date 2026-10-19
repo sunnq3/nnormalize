@@ -27,6 +27,10 @@ export function plainLabel(f: Finding): string {
       return f.details.reduction > 0 ? 'Grain and noise' : 'Uneven grain';
     case 'hotpixels':
       return 'Dead or stuck pixels';
+    case 'chroma':
+      return 'Colour blotches';
+    case 'ringing':
+      return 'Halos next to edges';
   }
 }
 
@@ -55,6 +59,13 @@ export function plainDescription(f: Finding): string {
     }
     case 'hotpixels':
       return `${f.details.count} single pixel${f.details.count === 1 ? '' : 's'} that don't match their surroundings`;
+    case 'chroma': {
+      const lv = Math.max(f.details.sigmaCbLevels, f.details.sigmaCrLevels);
+      const how = lv >= 3 ? 'heavy' : lv >= 1.5 ? 'noticeable' : 'light';
+      return `${how} colour noise (${fmt(lv, 1)} levels) in ${fmt(f.details.fraction * 100, 0)} % of the photo; this fix removes ${Math.round(f.details.amount * 100)} % of it there`;
+    }
+    case 'ringing':
+      return `noise next to hard edges is ${fmt(f.details.ratio, 1)}× the grain elsewhere; this fix smooths the band beside edges by ${Math.round(f.details.amount * 100)} %`;
   }
 }
 
@@ -81,6 +92,10 @@ export function plainFix(f: Finding): string {
         : 'Grain is levelled: reduced where it is heavier than the rest of the photo, matched grain added where an earlier tool scrubbed it.';
     case 'hotpixels':
       return 'Each pixel is replaced by the median of its eight neighbours.';
+    case 'chroma':
+      return 'The colour layer is smoothed where it is blotchy, guided by brightness so colour never bleeds across an edge. Brightness detail is untouched.';
+    case 'ringing':
+      return 'Only the band next to hard edges is smoothed, with an edge-keeping filter; the edge itself and everything else stay as they are.';
   }
 }
 
