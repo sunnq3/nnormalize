@@ -16,5 +16,6 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["src", "tests", "vite.config.ts", "vite.single.config.ts"]
+  "include": ["src", "tests", "vite.config.ts", "vite.single.config.ts"],
+  "exclude": ["assets", "dist", "dist-single", "node_modules"]
 }

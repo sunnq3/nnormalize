@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -27,6 +27,18 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run build:single && cp dist-single/index.html dist/nnormalize-single.html
+      # Keep a copy of the build at the repository root so the site also works
+      # when Pages is set to deploy from the main branch.
+      - run: node scripts/copy-pages.mjs
+      - name: Commit the root copy of the build
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A index.html assets nnormalize-single.html .nojekyll
+          if ! git diff --cached --quiet; then
+            git commit -m "Update built site [skip ci]"
+            git push
+          fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
