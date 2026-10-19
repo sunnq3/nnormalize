@@ -23,7 +23,8 @@ export interface PeriodicDetails {
   period: number; // pixels
   angleDeg: number; // 0 = vertical stripes, 90 = horizontal stripes
   lpi: number | null; // lines per inch when DPI is known
-  amplitude: number; // luma, 0..1
+  amplitude: number; // luma, 0..1, median over tiles
+  amplitudeP90: number; // 90th percentile over tiles
   phase: number;
   excessDb: number;
   z: number;

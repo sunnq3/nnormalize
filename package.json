@@ -18,9 +18,11 @@
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",
+    "vite-plugin-singlefile": "^2.3.4",
     "vitest": "^5.0.5"
   },
   "dependencies": {
-    "@jsquash/jpeg": "^1.6.0"
+    "@jsquash/jpeg": "^1.6.0",
+    "libheif-js": "^1.23.5"
   }
 }

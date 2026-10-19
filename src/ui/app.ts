@@ -11,6 +11,26 @@ import { stageSorted } from '../engine/engine';
 import { SpectrumPanel } from './spectrum';
 import { Viewer } from './viewer';
 import { el, fmt } from './dom';
+import { PRESETS } from './presets';
+
+interface RecipeFile {
+  tool: string;
+  version: number;
+  name?: string;
+  master?: number;
+  analysisOptions?: Partial<AnalysisOptions>;
+  exportOptions?: Partial<JpegExportOptions>;
+  budget?: Partial<Budget>;
+  findings: {
+    id: string;
+    kind: Finding['kind'];
+    enabled: boolean;
+    strength: number;
+    method?: string;
+    details?: { u: number; v: number };
+    mask?: { w: number; h: number; data: string };
+  }[];
+}
 
 interface LayerState {
   built: boolean;
@@ -33,6 +53,9 @@ export class App {
   private report: RoundTripReport | null = null;
   private jpegUrl: string | null = null;
   private busy = false;
+  private presetId = 'default';
+  private recipe: RecipeFile | null = null;
+  private batchQueue: File[] = [];
   private renderQueued = false;
   private rendering = false;
 
@@ -48,6 +71,9 @@ export class App {
   private detailEl!: HTMLElement;
   private exportEl!: HTMLElement;
   private sourceEl!: HTMLElement;
+  private analysisEl!: HTMLElement;
+  private recipeInput!: HTMLInputElement;
+  private batchInput!: HTMLInputElement;
   private modeButtons = new Map<ViewMode, HTMLButtonElement>();
   private zoomButtons = new Map<string, HTMLButtonElement>();
   private splitBtn!: HTMLButtonElement;
@@ -162,6 +188,19 @@ export class App {
 
     // side
     this.sourceEl = el('div', { class: 'source' });
+    this.analysisEl = el('div', { class: 'detail' });
+    this.recipeInput = el('input', { type: 'file', accept: '.json,application/json', style: 'display:none' }) as HTMLInputElement;
+    this.recipeInput.addEventListener('change', () => {
+      const f = this.recipeInput.files?.[0];
+      if (f) void this.loadRecipe(f);
+      this.recipeInput.value = '';
+    });
+    this.batchInput = el('input', { type: 'file', multiple: '', accept: 'image/*,.heic,.heif,.tif,.tiff', style: 'display:none' }) as HTMLInputElement;
+    this.batchInput.addEventListener('change', () => {
+      const files = Array.from(this.batchInput.files ?? []);
+      if (files.length) void this.runBatch(files);
+      this.batchInput.value = '';
+    });
     this.spectrum = new SpectrumPanel({
       onHover: (t) => (this.readout.innerHTML = t || 'Hover the spectrum for exact frequency and level; click a ring to select it.'),
       onClick: (u, v) => void this.addPeak(u, v),
@@ -186,6 +225,7 @@ export class App {
       'div',
       { class: 'side' },
       el('section', {}, el('h2', {}, 'Source'), this.sourceEl),
+      el('section', {}, el('h2', {}, 'Analysis'), this.analysisEl, this.recipeInput, this.batchInput),
       el('section', {}, el('h2', {}, 'Spectrum', el('span', { class: 'sub' }, 'averaged over tiles')), this.spectrum.el, this.readout, el('div', { class: 'tools', style: 'margin-top:6px' }, addBtn)),
       el('section', {}, el('h2', {}, 'Findings'), this.findingsEl),
       el('section', {}, el('h2', {}, 'Selected fix'), this.detailEl),
@@ -196,9 +236,79 @@ export class App {
     this.setMode('result');
     this.setZoom('fit');
     this.renderSource();
+    this.renderAnalysisPanel();
     this.renderFindings();
     this.renderDetail();
     this.renderExport();
+  }
+
+  private renderAnalysisPanel(): void {
+    const box = this.analysisEl;
+    box.innerHTML = '';
+    const sel = el('select') as HTMLSelectElement;
+    for (const p of PRESETS) {
+      const o = el('option', { value: p.id }, p.label) as HTMLOptionElement;
+      if (p.id === this.presetId) o.selected = true;
+      sel.appendChild(o);
+    }
+    const hint = el('div', { style: 'color:var(--ink-faint);margin:2px 0 6px' }, PRESETS.find((p) => p.id === this.presetId)?.hint ?? '');
+    sel.addEventListener('change', () => {
+      this.presetId = sel.value;
+      this.analysisOptions = { ...(PRESETS.find((p) => p.id === this.presetId)?.options ?? {}) };
+      this.renderAnalysisPanel();
+    });
+    box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Preset'), sel));
+    box.appendChild(hint);
+    const o = this.analysisOptions;
+    const z = el('input', { type: 'number', min: '3', max: '20', step: '0.5', value: String(o.zThreshold ?? 6) }) as HTMLInputElement;
+    z.addEventListener('change', () => (this.analysisOptions.zThreshold = Number(z.value)));
+    const amp = el('input', { type: 'number', min: '0.05', max: '20', step: '0.05', value: String(o.minAmplitudeLevels ?? 0.5) }) as HTMLInputElement;
+    amp.addEventListener('change', () => (this.analysisOptions.minAmplitudeLevels = Number(amp.value)));
+    const nz = el('input', { type: 'number', min: '1', max: '12', step: '0.5', value: String(o.noiseThresholdDb ?? 3) }) as HTMLInputElement;
+    nz.addEventListener('change', () => (this.analysisOptions.noiseThresholdDb = Number(nz.value)));
+    const lin = el('input', { type: 'checkbox' }) as HTMLInputElement;
+    lin.checked = !!o.linearLight;
+    lin.addEventListener('change', () => (this.analysisOptions.linearLight = lin.checked));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Peak threshold'), el('span', {}, z, ' z'), el('span')));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Visible from'), el('span', {}, amp, ' levels'), el('span')));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Noise uneven if'), el('span', {}, '± ', nz, ' dB'), el('span')));
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Linear light'), el('label', {}, lin, ' analyse after sRGB decode'), el('span')));
+    const tools = el('div', { class: 'tools' });
+    tools.appendChild(el('button', { onclick: () => void this.reanalyse(), disabled: this.info ? undefined : '' }, 'Re-analyse'));
+    tools.appendChild(el('button', { onclick: () => this.recipeInput.click() }, this.recipe ? `Recipe: ${this.recipe.name}` : 'Load recipe'));
+    if (this.recipe)
+      tools.appendChild(
+        el(
+          'button',
+          {
+            class: 'quiet',
+            onclick: () => {
+              this.recipe = null;
+              this.renderAnalysisPanel();
+            },
+          },
+          'Forget recipe',
+        ),
+      );
+    tools.appendChild(el('button', { onclick: () => this.batchInput.click() }, 'Batch: pick photos'));
+    box.appendChild(tools);
+    box.appendChild(
+      el(
+        'div',
+        { style: 'color:var(--ink-faint);margin-top:6px' },
+        'Batch runs every chosen photo through analysis, the loaded recipe (or the defaults), export and verification, and downloads each result with its report.',
+      ),
+    );
+  }
+
+  private async reanalyse(): Promise<void> {
+    if (!this.info || this.busy) return;
+    this.busy = true;
+    this.layers.clear();
+    this.masks.clear();
+    this.selected = null;
+    await this.runAnalysis();
+    this.busy = false;
   }
 
   // --- helpers --------------------------------------------------------------------
@@ -329,6 +439,7 @@ export class App {
     this.renderFindings();
     this.renderSource();
     this.renderExport();
+    if (this.recipe) await this.applyRecipe(this.recipe, a);
     const first = a.findings.find((f) => f.enabled);
     this.select(first ? first.id : null);
     this.setStatus(`Analysed in ${((performance.now() - t0) / 1000).toFixed(1)} s · ${a.findings.filter((f) => f.enabled).length} fix${a.findings.filter((f) => f.enabled).length === 1 ? '' : 'es'} suggested`);
@@ -465,7 +576,7 @@ export class App {
       fact('period', `${fmt(d.period, 3)} px`);
       fact('angle', `${fmt(d.angleDeg, 2)}°`);
       if (d.lpi) fact('screen ruling', `${fmt(d.lpi, 1)} lpi`);
-      fact('amplitude', `${fmt(d.amplitude * 255, 2)} levels`);
+      fact('amplitude', d.stationary ? `${fmt(d.amplitude * 255, 2)} levels` : `${fmt(d.amplitude * 255, 2)} typical, ${fmt(d.amplitudeP90 * 255, 2)} where strongest`);
       fact('above background', `${fmt(d.excessDb, 1)} dB (z ${fmt(d.z, 1)})`);
       fact('behaviour', d.stationary ? 'same everywhere' : 'varies across frame');
       fact('phase coherence', fmt(d.coherence, 2));
@@ -536,6 +647,16 @@ export class App {
     size.addEventListener('input', () => (this.viewer.brush.size = Number(size.value)));
     const hard = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(this.viewer.brush.hardness * 100)) }) as HTMLInputElement;
     hard.addEventListener('input', () => (this.viewer.brush.hardness = Number(hard.value) / 100));
+    const lo = el('input', { type: 'range', min: '0', max: '100', value: '0' }) as HTMLInputElement;
+    const hi = el('input', { type: 'range', min: '0', max: '100', value: '100' }) as HTMLInputElement;
+    const lumVal = el('span', { class: 'val' }, '0–100 %');
+    const applyLum = (): void => {
+      lumVal.textContent = `${lo.value}–${hi.value} %`;
+      void this.maskFromLuminosity(Number(lo.value) / 100, Number(hi.value) / 100);
+    };
+    lo.addEventListener('change', applyLum);
+    hi.addEventListener('change', applyLum);
+    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'By brightness'), el('div', { style: 'display:flex;gap:4px' }, lo, hi), lumVal));
     box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush size'), size, el('span', { class: 'val' }, 'px')));
     box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush edge'), hard, el('span', { class: 'val' }, 'soft→hard')));
     box.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'In mask view: drag to paint, shift-wheel to resize the brush, alt-drag to pan. Amber = fix applies.'));
@@ -592,6 +713,15 @@ export class App {
     this.queueRender();
   }
 
+  private async maskFromLuminosity(lo: number, hi: number): Promise<void> {
+    if (!this.selected) return;
+    const m = await this.client.luminosityMask(this.selected, lo, hi, 0.08);
+    this.masks.set(this.selected, m);
+    this.viewer.mask = m;
+    this.viewer.draw();
+    this.queueRender();
+  }
+
   private async addPeak(u: number, v: number): Promise<void> {
     if (!this.analysis || this.busy) return;
     this.spectrum.addMode = false;
@@ -619,7 +749,7 @@ export class App {
     };
     fact('file', m.fileName);
     fact('size', `${this.info.w} × ${this.info.h} px`);
-    fact('decoded with', m.decoder === 'mozjpeg' ? 'mozjpeg (exact)' : m.decoder === 'png' ? `own PNG decoder, ${m.bitDepth}-bit` : 'browser');
+    fact('decoded with', m.decoder === 'mozjpeg' ? 'mozjpeg (exact)' : m.decoder === 'png' ? `own PNG decoder, ${m.bitDepth}-bit` : m.decoder === 'libheif' ? 'libheif' : 'browser');
     if (m.jpeg) {
       fact('source quality', m.jpeg.quality ? `≈ ${fmt(m.jpeg.quality, 0)}` : 'unknown');
       fact('chroma', `${m.jpeg.subsampling}${m.jpeg.progressive ? ', progressive' : ''}`);
@@ -725,9 +855,34 @@ export class App {
           `Raise quality to ${Math.min(100, r.quality + 2)} and retry`,
         ),
       );
+    for (const sf of r.suggested) {
+      actions.appendChild(
+        el(
+          'button',
+          {
+            onclick: () => void this.adoptSuggested(sf),
+          },
+          `Add fix: ${sf.label.toLowerCase()}`,
+        ),
+      );
+    }
     actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadReport() }, 'Report as JSON'));
     box.appendChild(actions);
     return box;
+  }
+
+  /** Take a fix the verification proposed into the findings list and build it. */
+  private async adoptSuggested(f: Finding): Promise<void> {
+    if (!this.analysis || this.busy) return;
+    if (this.analysis.findings.some((x) => x.id === f.id)) return;
+    const copy: Finding = { ...f, enabled: true, strength: 1 };
+    this.analysis.findings.push(copy);
+    this.report = null;
+    this.renderFindings();
+    this.renderExport();
+    this.select(copy.id);
+    await this.rebuildFrom(copy);
+    this.setStatus(`${copy.label} added — export again to verify`);
   }
 
   private async doExport(): Promise<void> {
@@ -757,7 +912,107 @@ export class App {
     }
   }
 
-  private recipe(): unknown {
+  private async loadRecipe(file: File): Promise<void> {
+    try {
+      const r = JSON.parse(await file.text()) as RecipeFile;
+      if (r.tool !== 'nnormalize') throw new Error('not an nnormalize recipe');
+      r.name = file.name;
+      this.recipe = r;
+      if (r.exportOptions) this.exportOptions = { ...this.exportOptions, ...r.exportOptions };
+      if (r.budget) this.budget = { ...this.budget, ...r.budget };
+      if (r.analysisOptions) this.analysisOptions = { ...r.analysisOptions };
+      if (typeof r.master === 'number') {
+        this.master = r.master;
+        this.masterRange.value = String(Math.round(r.master * 100));
+        this.masterVal.textContent = `${Math.round(r.master * 100)} %`;
+      }
+      this.renderAnalysisPanel();
+      this.renderExport();
+      if (this.analysis && !this.busy) {
+        this.busy = true;
+        await this.applyRecipe(r, this.analysis);
+        this.renderFindings();
+        this.renderDetail();
+        await this.buildPending();
+        this.queueRender();
+        this.busy = false;
+      }
+      this.setStatus(`Recipe ${file.name} loaded`);
+    } catch (e) {
+      this.setStatus(`Could not load recipe: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  /**
+   * Apply a recipe to a fresh analysis: periodic entries match by frequency
+   * (within two bins, either conjugate), other kinds by kind. Unmatched
+   * recipe entries are ignored; unmatched findings keep their defaults.
+   */
+  private async applyRecipe(r: RecipeFile, a: Analysis): Promise<void> {
+    const tol = 2 / a.spectrum.size;
+    for (const entry of r.findings) {
+      let target: Finding | undefined;
+      if (entry.kind === 'periodic' && entry.details) {
+        const d = entry.details;
+        target = a.findings.find(
+          (f) => f.kind === 'periodic' && ((Math.abs(f.details.u - d.u) < tol && Math.abs(f.details.v - d.v) < tol) || (Math.abs(f.details.u + d.u) < tol && Math.abs(f.details.v + d.v) < tol)),
+        );
+      } else target = a.findings.find((f) => f.kind === entry.kind);
+      if (!target) continue;
+      target.enabled = entry.enabled;
+      target.strength = entry.strength;
+      if (entry.method && target.kind === 'periodic' && ['parametric', 'parametric-tiled', 'flatten', 'notch'].includes(entry.method)) target.method = entry.method as PeriodicMethod;
+      if (entry.mask) {
+        const bin = atob(entry.mask.data);
+        const data = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) data[i] = bin.charCodeAt(i);
+        const m = { w: entry.mask.w, h: entry.mask.h, data };
+        this.masks.set(target.id, m);
+        await this.client.setMask(target.id, m.w, m.h, m.data);
+      }
+    }
+  }
+
+  private async runBatch(files: File[]): Promise<void> {
+    if (this.busy) return;
+    this.batchQueue = files;
+    const results: { file: string; pass: boolean; reasons: string[]; bytes: number }[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      this.setStatus(`Batch ${i + 1}/${files.length}: ${f.name}`);
+      try {
+        await this.open(f);
+        if (!this.analysis) throw new Error('analysis failed');
+        this.busy = true;
+        const { jpeg, report } = await this.client.export(this.layerSettings(), this.master, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
+          this.setStatus(`Batch ${i + 1}/${files.length}: ${f.name} — ${stage}`, fr),
+        );
+        this.report = report;
+        this.renderExport();
+        const name = f.name.replace(/\.[^.]+$/, '') + '-normalized.jpg';
+        this.downloadBlob(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }), name);
+        results.push({ file: f.name, pass: report.pass, reasons: report.reasons, bytes: jpeg.length });
+      } catch (e) {
+        results.push({ file: f.name, pass: false, reasons: [e instanceof Error ? e.message : String(e)], bytes: 0 });
+      } finally {
+        this.busy = false;
+      }
+    }
+    this.downloadJson({ tool: 'nnormalize', batch: results, recipe: this.recipe?.name ?? null, exportOptions: this.exportOptions, budget: this.budget }, 'nnormalize-batch-report.json');
+    const passed = results.filter((r) => r.pass).length;
+    this.setStatus(`Batch done: ${passed}/${results.length} passed verification`);
+  }
+
+  private downloadBlob(blob: Blob, name: string): void {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }
+
+  private recipeJson(): unknown {
     if (!this.analysis) return null;
     return {
       tool: 'nnormalize',
@@ -781,7 +1036,7 @@ export class App {
   }
 
   private downloadRecipe(): void {
-    const r = this.recipe();
+    const r = this.recipeJson();
     if (!r) return;
     this.downloadJson(r, (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '.nnormalize.json');
   }
@@ -789,7 +1044,7 @@ export class App {
   private downloadReport(): void {
     if (!this.report) return;
     const r = { ...this.report, residual: this.report.residual.map((f) => ({ ...f, details: f.kind === 'periodic' ? { ...f.details, presence: undefined } : f.details })) };
-    this.downloadJson({ report: r, recipe: this.recipe(), notChecked: this.analysis?.notChecked }, (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '.report.json');
+    this.downloadJson({ report: r, recipe: this.recipeJson(), notChecked: this.analysis?.notChecked }, (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '.report.json');
   }
 
   private downloadJson(obj: unknown, name: string): void {

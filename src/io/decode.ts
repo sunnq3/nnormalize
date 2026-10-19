@@ -11,6 +11,7 @@ import { qualityFromQuantTable } from '../dsp/blocks';
 import { exifDpi, normaliseExif, readExif, type ExifSummary } from './exif';
 import { isJpeg, parseJpeg, type JpegInfo } from './jpegParse';
 import { decodePng, isPng } from './png';
+import { decodeHeif, isHeif } from './heic';
 
 export interface JpegSourceInfo {
   quality: number | null;
@@ -25,7 +26,7 @@ export interface SourceMeta {
   mime: string;
   byteLength: number;
   bitDepth: number;
-  decoder: 'mozjpeg' | 'png' | 'native';
+  decoder: 'mozjpeg' | 'png' | 'native' | 'libheif';
   exif: Uint8Array | null; // TIFF payload, orientation already normalised to 1
   exifSummary: ExifSummary;
   dpi: number | null;
@@ -202,7 +203,44 @@ export async function decodeImage(file: Blob & { name?: string }): Promise<Sourc
     }
   }
 
+  if (isHeif(bytes)) {
+    // the browser first (Safari, and Chrome for AVIF), libheif if it refuses
+    try {
+      const native = await decodeNative(file);
+      return nativeResult(base, native);
+    } catch {
+      const heif = await decodeHeif(bytes);
+      if (!heif) throw new Error('HEIC/HEIF file could not be decoded');
+      const exif = extractHeifExif(bytes);
+      const summary = readExif(exif);
+      const o = applyOrientation(heif.planes, summary.orientation);
+      return {
+        w: o.w,
+        h: o.h,
+        planes: o.planes as [Plane, Plane, Plane],
+        meta: {
+          ...base,
+          mime: 'image/heic',
+          bitDepth: 8,
+          decoder: 'libheif',
+          exif: exif ? normaliseExif(exif) : null,
+          exifSummary: summary,
+          dpi: exifDpi(summary),
+          icc: null,
+          xmp: null,
+          jpeg: null,
+          orientationApplied: summary.orientation,
+          hasAlpha: false,
+        },
+      };
+    }
+  }
+
   const native = await decodeNative(file);
+  return nativeResult(base, native);
+}
+
+function nativeResult(base: Pick<SourceMeta, 'fileName' | 'mime' | 'byteLength'>, native: { planes: [Plane, Plane, Plane]; w: number; h: number; hasAlpha: boolean }): SourceImage {
   return {
     w: native.w,
     h: native.h,
@@ -221,4 +259,23 @@ export async function decodeImage(file: Blob & { name?: string }): Promise<Sourc
       hasAlpha: native.hasAlpha,
     },
   };
+}
+
+
+/**
+ * Best-effort EXIF extraction from a HEIF container: the Exif item payload is
+ * a 4-byte offset followed by the TIFF header. We scan for the "Exif\0\0"
+ * marker and the TIFF byte-order mark that follows it.
+ */
+function extractHeifExif(bytes: Uint8Array): Uint8Array | null {
+  const n = bytes.length;
+  for (let i = 0; i + 10 < n; i++) {
+    if (bytes[i] === 0x45 && bytes[i + 1] === 0x78 && bytes[i + 2] === 0x69 && bytes[i + 3] === 0x66 && bytes[i + 4] === 0 && bytes[i + 5] === 0) {
+      const t = i + 6;
+      const le = bytes[t] === 0x49 && bytes[t + 1] === 0x49;
+      const be = bytes[t] === 0x4d && bytes[t + 1] === 0x4d;
+      if (le || be) return bytes.slice(t, Math.min(n, t + 65000));
+    }
+  }
+  return null;
 }

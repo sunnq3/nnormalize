@@ -21,6 +21,8 @@ export interface PatternMeasure {
   u: number;
   v: number;
   amplitude: number; // robust global amplitude (median over tiles)
+  amplitudeP90: number; // 90th percentile over tiles: what a local pattern reaches where it is present
+  amplitudeMax: number;
   phase: number; // amplitude-weighted circular mean of per-tile global phases
   /** Mean resultant length of the phases: 1 = identical everywhere, 0 = random. */
   phaseCoherence: number;
@@ -93,6 +95,8 @@ export function measurePattern(plane: Plane, grid: TileGrid, u0: number, v0: num
 
   const amps = perTile.map((t) => t.amplitude).sort((a, b) => a - b);
   const medianAmp = amps.length & 1 ? amps[amps.length >> 1] : 0.5 * (amps[(amps.length >> 1) - 1] + amps[amps.length >> 1]);
+  const p90 = amps[Math.min(amps.length - 1, Math.floor(0.9 * (amps.length - 1)))];
+  const amplitudeMax = amps[amps.length - 1];
   let meanAmp = 0;
   for (const a of amps) meanAmp += a;
   meanAmp /= amps.length;
@@ -122,6 +126,8 @@ export function measurePattern(plane: Plane, grid: TileGrid, u0: number, v0: num
     u,
     v,
     amplitude: medianAmp,
+    amplitudeP90: p90,
+    amplitudeMax,
     phase: wrapPhase(phase),
     phaseCoherence: coherence,
     amplitudeCv: cv,

@@ -59,6 +59,12 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
         post({ type: 'mask', id, w: m.w, h: m.h, data: new Uint8Array(m.data) });
         break;
       }
+      case 'luminosityMask': {
+        const m = engine.luminosityMask(msg.lo, msg.hi, msg.soft);
+        engine.setMask(msg.findingId, m.w, m.h, m.data);
+        post({ type: 'mask', id, w: m.w, h: m.h, data: new Uint8Array(m.data) });
+        break;
+      }
       case 'addPeak': {
         const finding = engine.addPeak(msg.u, msg.v);
         post({ type: 'finding', id, finding }, transferablesOf(finding));

@@ -3,6 +3,7 @@
  */
 
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
+import { createEngineWorker } from './workerFactory';
 import type { JpegExportOptions } from '../io/encode';
 import type { Budget, LayerSetting, LayerStats, LoadedInfo, RenderRequest, RenderResult, Request, Response, RoundTripReport, SynthRequest } from './protocol';
 
@@ -16,7 +17,7 @@ export class EngineClient {
   private pending = new Map<number, Pending>();
 
   constructor() {
-    this.worker = new Worker(new URL('../workers/engine.worker.ts', import.meta.url), { type: 'module' });
+    this.worker = createEngineWorker();
     this.worker.onmessage = (ev: MessageEvent<Response>) => {
       const msg = ev.data;
       const p = this.pending.get(msg.id);
@@ -73,6 +74,12 @@ export class EngineClient {
 
   async presenceMask(findingId: string): Promise<{ w: number; h: number; data: Uint8Array }> {
     const r = await this.send({ type: 'presenceMask', findingId });
+    if (r.type !== 'mask') throw new Error('unexpected reply');
+    return { w: r.w, h: r.h, data: r.data };
+  }
+
+  async luminosityMask(findingId: string, lo: number, hi: number, soft: number): Promise<{ w: number; h: number; data: Uint8Array }> {
+    const r = await this.send({ type: 'luminosityMask', findingId, lo, hi, soft });
     if (r.type !== 'mask') throw new Error('unexpected reply');
     return { w: r.w, h: r.h, data: r.data };
   }

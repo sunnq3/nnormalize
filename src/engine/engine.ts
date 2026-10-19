@@ -196,6 +196,7 @@ export class Engine {
         angleDeg: desc.angleDeg,
         lpi: this.source.meta.dpi ? desc.radius * this.source.meta.dpi : null,
         amplitude: m.amplitude,
+        amplitudeP90: m.amplitudeP90,
         phase: m.phase,
         excessDb,
         z,
@@ -295,6 +296,41 @@ export class Engine {
         const v = a * (1 - t) + b * t;
         // presence is amplitude relative to the strongest tile; treat ≥ 0.6 as full
         data[y * w + x] = Math.round(255 * Math.min(1, Math.max(0, v / 0.6)));
+      }
+    }
+    return { w, h, data };
+  }
+
+  /** Mask from the image's own brightness: 1 inside [lo, hi] (0..1 luma), feathered over `soft`. */
+  luminosityMask(lo: number, hi: number, soft: number): Mask {
+    const w = this.maskW;
+    const h = this.maskH;
+    const data = new Uint8Array(w * h);
+    const [r, g, b] = this.previewSource;
+    const pw = this.pw;
+    const ph = this.ph;
+    const fx = pw / w;
+    const fy = ph / h;
+    const smooth = (x: number): number => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        // area average of the preview luma under this mask cell
+        let s = 0;
+        let n = 0;
+        const x0 = Math.floor(x * fx);
+        const x1 = Math.max(x0 + 1, Math.floor((x + 1) * fx));
+        const y0 = Math.floor(y * fy);
+        const y1 = Math.max(y0 + 1, Math.floor((y + 1) * fy));
+        for (let yy = y0; yy < y1 && yy < ph; yy++) {
+          for (let xx = x0; xx < x1 && xx < pw; xx++) {
+            const i = yy * pw + xx;
+            s += 0.299 * r[i] + 0.587 * g[i] + 0.114 * b[i];
+            n++;
+          }
+        }
+        const l = n ? s / n : 0;
+        const m = Math.min(smooth((l - lo + soft) / Math.max(1e-6, soft)), smooth((hi - l + soft) / Math.max(1e-6, soft)));
+        data[y * w + x] = Math.round(255 * Math.max(0, Math.min(1, m)));
       }
     }
     return { w, h, data };
@@ -478,7 +514,9 @@ export class Engine {
       { ...analysisOptions, quick: true, maxWelchTiles: 16 },
       (st, fr) => progress('verify:' + st, fr),
     );
-    const residual = a.findings.filter((f) => f.kind === 'periodic' && f.details.excessDb > budget.maxPeakDb && f.details.amplitude * 255 >= budget.minPeakLevels);
+    const residual = a.findings.filter(
+      (f) => f.kind === 'periodic' && f.details.excessDb > budget.maxPeakDb && Math.max(f.details.amplitude, f.details.amplitudeP90) * 255 >= budget.minPeakLevels,
+    );
     const reasons: string[] = [];
     if (residual.length)
       reasons.push(`${residual.length} periodic component${residual.length > 1 ? 's' : ''} still above ${budget.maxPeakDb} dB and ${budget.minPeakLevels} levels`);
@@ -486,7 +524,23 @@ export class Engine {
     if (a.blockGrid.detected && bs > budget.maxBlockStrength) reasons.push(`block grid at ${(bs * 100).toFixed(0)} % exceeds ${(budget.maxBlockStrength * 100).toFixed(0)} %`);
     if (encodePsnr < budget.minEncodePsnr)
       reasons.push(`encode error ${encodePsnr.toFixed(1)} dB is below ${budget.minEncodePsnr} dB (the encoder discarded fine grain or detail); raise quality to keep more`);
+    // Fixes the output analysis can see that the source analysis could not:
+    // a block grid hidden under strong interference, or a periodic component
+    // the source thresholds missed.
+    const suggested: Finding[] = [];
+    const src = this.analysis!;
+    const gridAlready = src.findings.some((f) => f.kind === 'jpeg-grid');
+    const outGrid = a.findings.find((f) => f.kind === 'jpeg-grid');
+    if (outGrid && !gridAlready && bs > budget.maxBlockStrength) suggested.push({ ...outGrid, id: 'jpeg-grid', note: 'Found on the exported file; it was hidden under the interference in the source analysis.' });
+    for (const f of residual) {
+      const tol = 2 / a.spectrum.size;
+      const known = src.findings.some(
+        (g) => g.kind === 'periodic' && f.kind === 'periodic' && ((Math.abs(g.details.u - f.details.u) < tol && Math.abs(g.details.v - f.details.v) < tol) || (Math.abs(g.details.u + f.details.u) < tol && Math.abs(g.details.v + f.details.v) < tol)),
+      );
+      if (!known) suggested.push({ ...f, id: `verify-${suggested.length}`, note: 'Found on the exported file, not in the source analysis.' });
+    }
     return {
+      suggested,
       encodePsnr,
       encodeRmsLevels,
       bytes: jpeg.length,

@@ -135,11 +135,12 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       label = 'Moiré / oblique pattern';
     }
     const severity = Math.max(0, Math.min(1, (fundamental.excessDb - 6) / 40)) * Math.min(1, m.amplitude / (4 * floor));
-    const visible = m.amplitude >= floor;
+    // a pattern confined to part of the frame is judged by what it reaches there
+    const visible = Math.max(m.amplitude, m.amplitudeP90) >= floor;
     const strong = fundamental.excessDb >= 12 && fundamental.z >= 8 && visible;
     const confidence = fundamental.z > 15 && m.phaseCoherence > 0.6 ? 'high' : fundamental.z >= 8 ? 'medium' : 'low';
     let note = '';
-    if (!visible) note = `Only ${(m.amplitude * 255).toFixed(2)} levels: below the ${opts.minAmplitudeLevels} level floor, not visible. Left unticked.`;
+    if (!visible) note = `Only ${(m.amplitudeP90 * 255).toFixed(2)} levels at most: below the ${opts.minAmplitudeLevels} level floor, not visible. Left unticked.`;
     else if (!strong) note = 'Weak; could be real texture (fabric, screen, brick). Left unticked.';
     else if (m.phaseCoherence < 0.4 && !m.stationary) note = 'Varies across the frame; tiled subtraction will follow it.';
 
@@ -168,6 +169,7 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
         angleDeg: desc.angleDeg,
         lpi,
         amplitude: m.amplitude,
+        amplitudeP90: m.amplitudeP90,
         phase: m.phase,
         excessDb: fundamental.excessDb,
         z: fundamental.z,

@@ -57,6 +57,8 @@ export interface RoundTripReport {
   residualPeriodic: number;
   blockGrid: { detected: boolean; strength: number };
   noise: { globalSigmaLevels: number; expectedLevels: number };
+  /** fixes the verification suggests adding, e.g. a block grid the source analysis could not see under the interference */
+  suggested: Finding[];
   pass: boolean;
   reasons: string[];
   budget: Budget;
@@ -91,7 +93,8 @@ export type Request =
   | { type: 'export'; id: number; layers: LayerSetting[]; master: number; options: JpegExportOptions; budget: Budget; analysisOptions: Partial<AnalysisOptions> }
   | { type: 'verifyResult'; id: number; layers: LayerSetting[]; master: number; analysisOptions: Partial<AnalysisOptions> }
   | { type: 'presenceMask'; id: number; findingId: string }
-  | { type: 'addPeak'; id: number; u: number; v: number };
+  | { type: 'addPeak'; id: number; u: number; v: number }
+  | { type: 'luminosityMask'; id: number; findingId: string; lo: number; hi: number; soft: number };
 
 export type Response =
   | { type: 'progress'; id: number; stage: string; fraction: number }
