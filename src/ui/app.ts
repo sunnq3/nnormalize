@@ -1050,6 +1050,11 @@ export class App {
     };
     fact('file', `${(r.bytes / 1024).toFixed(0)} kB, quality ${r.quality}, ${r.chroma === '4:4:4' ? 'full colour detail' : 'reduced colour detail'}`);
     if (r.passes > 1) fact('settled', r.stable ? `yes, in ${r.passes} passes: a re-save there reproduces it` : `not fully after ${r.passes} passes`);
+    if (r.settled)
+      fact(
+        'block edges written on their grid',
+        `${Math.round((100 * r.settled.changedBlocks) / Math.max(1, r.settled.blocks))} % of blocks adjusted at quality ${r.settled.quality} so a re-save keeps the boundaries smooth (moved pixels by ${fmt(r.settled.meanChangeLevels, 2)} lv)`,
+      );
     fact('block edges, downloader’s copy', `${fmt(r.survival.blockStepLevels.resultOnDest, 2)} lv (untouched photo: ${fmt(r.survival.blockStepLevels.sourceOnDest, 2)})`);
     fact('grain, downloader’s copy', `${fmt(r.survival.grainLevels.resultOnDest, 2)} lv (untouched photo: ${fmt(r.survival.grainLevels.sourceOnDest, 2)})`);
     fact('patterns visible', r.residualPeriodic ? r.residual.map((f) => (f.kind === 'periodic' ? `every ${fmt(f.details.period, 1)} px, ${fmt(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255, 1)} lv` : '')).join('; ') : 'none');
@@ -1087,16 +1092,24 @@ export class App {
     this.exportBtn.disabled = true;
     try {
       const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
-        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
+        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
       );
       if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
       this.report = report;
       this.checked = true;
-      const kept = report.survival.fixes.filter((f) => f.verdict === 'survives').length;
-      this.setStatus(
-        `${download ? 'Saved' : 'Checked'} ${(jpeg.length / 1024).toFixed(0)} kB: ${kept} of ${report.survival.fixes.length} fixes fully survive ${report.checkLabel}${report.pass ? '' : ' — see the report'}`,
-      );
+      const fixes = report.survival.fixes;
+      const kept = fixes.filter((f) => f.verdict === 'survives').length;
+      const lost = fixes.filter((f) => f.verdict === 'lost').length;
+      const how =
+        fixes.length === 0
+          ? 'nothing to check'
+          : kept === fixes.length
+            ? `every fix holds through ${report.checkLabel}`
+            : lost === 0
+              ? `${kept} of ${fixes.length} fixes hold fully through ${report.checkLabel}, the rest partly`
+              : `${lost} of ${fixes.length} fixes lost through ${report.checkLabel} — see the report`;
+      this.setStatus(`${download ? 'Saved' : 'Checked'} ${(jpeg.length / 1024).toFixed(0)} kB: ${how}`);
       this.renderExport();
       if (download) {
         const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';

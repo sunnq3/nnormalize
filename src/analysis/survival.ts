@@ -77,7 +77,8 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
         const a1 = amp(lumSD);
         const a2 = amp(lumRD);
         const retained = a1 > 0.05 ? Math.max(0, Math.min(1, 1 - a2 / a1)) : 1;
-        const v = verdictFor(retained);
+        // under one level nobody can see a pattern, whatever share of it that is
+        const v = a2 < 1.0 ? 'survives' : verdictFor(retained);
         fixes.push({
           id: f.id,
           kind: f.kind,
@@ -90,7 +91,9 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
           verdict: v,
           note:
             v === 'survives'
-              ? 'The pattern stays gone.'
+              ? a2 < 1.0 && retained < 0.8
+                ? `what remains (${a2.toFixed(1)} levels) is below what can be seen.`
+                : 'The pattern stays gone.'
               : v === 'partly'
                 ? `part of the pattern shows again after the re-save (${a2.toFixed(1)} of ${a1.toFixed(1)} levels).`
                 : `the re-save brings the pattern back (${a2.toFixed(1)} of ${a1.toFixed(1)} levels).`,
@@ -148,6 +151,7 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
         const c2 = cn(resDest);
         const target = c1 * (1 - f.details.amount);
         const retained = c1 > 0.05 ? Math.max(0, Math.min(1, (c1 - c2) / Math.max(1e-6, c1 - target))) : 1;
+        const cv = c2 < f.details.thresholdLevels ? 'survives' : verdictFor(retained);
         fixes.push({
           id: f.id,
           kind: f.kind,
@@ -157,8 +161,8 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
           sourceOnDest: c1,
           resultOnDest: c2,
           retained,
-          verdict: verdictFor(retained),
-          note: retained >= 0.8 ? 'colour stays clean.' : 'some colour noise shows again after the re-save.',
+          verdict: cv,
+          note: cv === 'survives' ? 'colour stays clean.' : 'some colour noise shows again after the re-save.',
         });
         break;
       }

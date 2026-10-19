@@ -5,6 +5,7 @@
  */
 
 import { analyze } from '../analysis/analyze';
+import { jpegYccToRgb, rgbToJpegYcc, settleBlocks } from '../dsp/jpegdomain';
 import { measureSurvival } from '../analysis/survival';
 import { computeDelta } from '../analysis/apply';
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
@@ -516,6 +517,23 @@ export class Engine {
     const opts = profile.encode;
     progress('compose', 0);
     const composed = this.compose(layers, master);
+    // Block settling at the destination's quality: when the file is written
+    // with the destination's own tables and the block fix is on, the luma is
+    // put on that quality's coefficient grid with block boundaries settled,
+    // so the destination's re-save cannot bring the steps back.
+    let settled: RoundTripReport['settled'] = null;
+    const blockFixOn = findings.some((f) => f.kind === 'jpeg-grid' && f.enabled) && layers.some((l) => l.id === 'jpeg-grid' && l.strength > 0);
+    if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
+      progress('settle', 0);
+      const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
+      const r = settleBlocks(Y, opts.quality);
+      const rgb = jpegYccToRgb(r.plane, Cb, Cr);
+      composed[0] = rgb[0];
+      composed[1] = rgb[1];
+      composed[2] = rgb[2];
+      settled = { quality: opts.quality, changedBlocks: r.changed, blocks: r.blocks, meanChangeLevels: r.meanChange * 255 };
+      progress('settle', 1);
+    }
     progress('encode', 0);
     const meta = this.source.meta;
     const enc = await encodeToJpeg(composed, opts, { exif: meta.exif, icc: meta.icc, xmp: meta.xmp }, (pass) =>
@@ -587,6 +605,7 @@ export class Engine {
       profileLabel: profile.label,
       passes: enc.passes,
       stable: enc.stable,
+      settled,
       checkLabel: profile.check.label,
       survival,
       residual,

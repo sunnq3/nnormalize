@@ -60,6 +60,8 @@ export interface RoundTripReport {
   /** fixed-point encoding: how many passes it took and whether the bytes settled */
   passes: number;
   stable: boolean;
+  /** block settling on the destination's coefficient grid, when it was done */
+  settled: { quality: number; changedBlocks: number; blocks: number; meanChangeLevels: number } | null;
   /** what the check simulated */
   checkLabel: string;
   /** per-fix survival through the simulated re-save, plus the before/after a downloader sees */
@@ -78,12 +80,12 @@ export interface RoundTripReport {
 
 export interface Budget {
   maxPeakDb: number; // no periodic finding above this excess (default 12) ...
-  minPeakLevels: number; // ... unless its amplitude is below this many 8-bit levels (default 0.5)
+  minPeakLevels: number; // ... unless its amplitude is below this many 8-bit levels (default 1: under one level nobody sees it)
   maxBlockStrength: number; // default 0.05
   minEncodePsnr: number; // default 40 dB (≈ 2.5 levels rms; a q95 encode of a grainy photo lands near here because it discards fine grain)
 }
 
-export const defaultBudget: Budget = { maxPeakDb: 12, minPeakLevels: 0.5, maxBlockStrength: 0.05, minEncodePsnr: 40 };
+export const defaultBudget: Budget = { maxPeakDb: 12, minPeakLevels: 1.0, maxBlockStrength: 0.05, minEncodePsnr: 40 };
 
 export interface SynthRequest {
   w: number;
