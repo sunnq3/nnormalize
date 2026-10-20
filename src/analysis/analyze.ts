@@ -2,6 +2,9 @@
  * The analysis pass: from planar RGB to a list of findings.
  */
 
+import { subsampleGrid } from '../dsp/tiles';
+import { bandingStrength, detectBanding } from '../dsp/banding';
+import { detailBalance, radialProfile } from '../dsp/spectrum';
 import { backgroundModel } from '../dsp/background';
 import { detectBlockGrid } from '../dsp/blocks';
 import { measureChromaNoise, measureRinging, toYCbCr } from '../dsp/chroma';
@@ -23,6 +26,8 @@ import {
   type Finding,
   type RingingFinding,
   type GrainFinding,
+  type DetailFinding,
+  type BandingFinding,
   type HotPixelFinding,
   type JpegGridFinding,
   type NoiseFinding,
@@ -49,19 +54,7 @@ export function srgbToLinear(p: Plane): Plane {
 }
 
 /** Evenly spaced subset of a grid's tile origins so the Welch pass stays bounded. */
-export function subsampleGrid(grid: TileGrid, maxTiles: number): TileGrid {
-  const total = grid.xs.length * grid.ys.length;
-  if (total <= maxTiles) return grid;
-  const ratio = Math.sqrt(maxTiles / total);
-  const pick = (arr: number[]): number[] => {
-    const k = Math.max(1, Math.round(arr.length * ratio));
-    if (k >= arr.length) return arr;
-    const out: number[] = [];
-    for (let i = 0; i < k; i++) out.push(arr[Math.round((i * (arr.length - 1)) / Math.max(1, k - 1))]);
-    return Array.from(new Set(out));
-  };
-  return { size: grid.size, hop: grid.hop, xs: pick(grid.xs), ys: pick(grid.ys) };
-}
+export { subsampleGrid } from '../dsp/tiles';
 
 const n0 = (n: number): number => n;
 
@@ -420,6 +413,71 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       findings.push(rf);
     }
     t = mark('ringing', t);
+
+    // --- detail balance ---------------------------------------------------------
+    progress('detail', 0);
+    {
+      const levelName = optsIn.level ?? defaultAnalysisOptions.level;
+      const bal = detailBalance(radialProfile(cleanLuma), nmodel.globalSigma);
+      const mode: 'smooth' | 'sharp' | null = bal.excessDb >= 2.5 ? 'sharp' : bal.deficitDb >= 3 ? 'smooth' : null;
+      if (mode) {
+        const enabled = mode === 'sharp' ? levelName !== 'gentle' : levelName === 'strong' || levelName === 'maximum';
+        const df: DetailFinding = {
+          id: 'detail',
+          kind: 'detail',
+          label: mode === 'sharp' ? 'Oversharpened' : 'Too smooth',
+          description: mode === 'sharp' ? `fine detail ${bal.excessDb.toFixed(1)} dB above the scene's reference` : `fine detail ${bal.deficitDb.toFixed(1)} dB below the scene's reference`,
+          severity: Math.min(1, (mode === 'sharp' ? bal.excessDb : bal.deficitDb) / 10),
+          extent: 1,
+          enabled,
+          confidence: (mode === 'sharp' ? bal.excessDb : bal.deficitDb) >= 5 ? 'high' : 'medium',
+          note: enabled ? '' : mode === 'smooth' ? 'Bringing detail back is on from the Strong level. Tick it to try it here.' : 'Left alone at the Gentle level.',
+          strength: 1,
+          method: 'detail-balance',
+          details: {
+            mode,
+            deficitDb: bal.deficitDb,
+            excessDb: bal.excessDb,
+            line: bal.line,
+            grainSigma: nmodel.globalSigma,
+            f: bal.f,
+            measured: bal.measured,
+            reference: bal.reference,
+            amount: 1,
+            maxBoostDb: levelName === 'maximum' ? 9 : 6,
+          },
+        };
+        findings.push(df);
+      }
+    }
+    t = mark('detail', t);
+
+    // --- banding in smooth areas -------------------------------------------------
+    progress('banding', 0);
+    {
+      const levelName = optsIn.level ?? defaultAnalysisOptions.level;
+      const bands = detectBanding(g, nmap);
+      if (bands.fraction >= 0.02) {
+        const strengthLevels = bandingStrength(cleanLuma, bands.banded, bands.bw, bands.bh, bands.block);
+        const enabled = levelName !== 'gentle';
+        const bf: BandingFinding = {
+          id: 'banding',
+          kind: 'banding',
+          label: 'Banding in smooth areas',
+          description: `steps of ${bands.stepLevels} level${bands.stepLevels === 1 ? '' : 's'} in smooth gradients, ${(bands.fraction * 100).toFixed(0)} % of the photo`,
+          severity: Math.min(1, strengthLevels / 0.6),
+          extent: bands.fraction,
+          enabled,
+          confidence: bands.fraction >= 0.08 ? 'high' : 'medium',
+          note: enabled ? '' : 'Left alone at the Gentle level.',
+          strength: 1,
+          method: 'deband',
+          details: { block: bands.block, bw: bands.bw, bh: bands.bh, banded: bands.banded, fraction: bands.fraction, stepLevels: bands.stepLevels, strengthLevels, amount: 1 },
+        };
+        findings.push(bf);
+      }
+    }
+    t = mark('banding', t);
 
     // --- grain put back ------------------------------------------------------
     // Clean-up leaves smooth areas looking like plastic. A fine photon-like

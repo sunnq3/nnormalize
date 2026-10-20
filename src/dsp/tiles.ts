@@ -85,3 +85,18 @@ export function binToFreq(bin: number, size: number): number {
 export function freqToBin(f: number, size: number): number {
   return f * size + (size >> 1);
 }
+
+/** An evenly spread subset of the tiles, at most `maxTiles`. */
+export function subsampleGrid(grid: TileGrid, maxTiles: number): TileGrid {
+  const total = grid.xs.length * grid.ys.length;
+  if (total <= maxTiles) return grid;
+  const ratio = Math.sqrt(maxTiles / total);
+  const pick = (arr: number[]): number[] => {
+    const k = Math.max(1, Math.round(arr.length * ratio));
+    if (k >= arr.length) return arr;
+    const out: number[] = [];
+    for (let i = 0; i < k; i++) out.push(arr[Math.round((i * (arr.length - 1)) / Math.max(1, k - 1))]);
+    return Array.from(new Set(out));
+  };
+  return { size: grid.size, hop: grid.hop, xs: pick(grid.xs), ys: pick(grid.ys) };
+}

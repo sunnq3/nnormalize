@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain';
+export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband';
 
 export interface HarmonicInfo {
   order: number;
@@ -91,6 +91,36 @@ export interface RingingDetails {
   amount: number; // 0..1
 }
 
+export interface DetailDetails {
+  /** smooth = fine detail missing (boost it); sharp = oversharpened (tone it down) */
+  mode: 'smooth' | 'sharp';
+  deficitDb: number;
+  excessDb: number;
+  /** the scene's reference line (coarse-to-mid detail extended), to judge every copy against */
+  line: { slope: number; mx: number; my: number };
+  /** the photo's grain, plane units, for the reference floor */
+  grainSigma: number;
+  f: Float32Array;
+  measured: Float32Array;
+  reference: Float32Array;
+  amount: number; // 0..1
+  /** most the fine detail may be raised, dB of amplitude */
+  maxBoostDb: number;
+}
+
+export interface BandingDetails {
+  block: number;
+  bw: number;
+  bh: number;
+  /** 1 per 32-px block that is banded */
+  banded: Uint8Array;
+  fraction: number;
+  stepLevels: number;
+  /** how visible the banding is, levels (a ramp is ~0, 1-level steps ~0.3) */
+  strengthLevels: number;
+  amount: number; // 0..1
+}
+
 export interface GrainDetails {
   /** grain to end up with everywhere, levels (the photo's own base grain before clean-up is the reference) */
   targetLevels: number;
@@ -160,7 +190,18 @@ export interface GrainFinding extends FindingBase {
   details: GrainDetails;
 }
 
-export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding;
+export interface DetailFinding extends FindingBase {
+  kind: 'detail';
+  method: 'detail-balance';
+  details: DetailDetails;
+}
+export interface BandingFinding extends FindingBase {
+  kind: 'banding';
+  method: 'deband';
+  details: BandingDetails;
+}
+
+export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
 
 export interface SpectrumView {
   size: number;

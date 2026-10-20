@@ -68,6 +68,11 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
         post({ type: 'export', id, jpeg, report }, [jpeg.buffer]);
         break;
       }
+      case 'liveCheck': {
+        const report = await engine.liveCheck(msg.layers, msg.findings, msg.master, msg.profile, msg.options);
+        post({ type: 'live', id, report });
+        break;
+      }
       case 'verifyResult': {
         const analysis = engine.verifyResult(msg.layers, msg.master, msg.analysisOptions, progress);
         post({ type: 'verify', id, analysis });

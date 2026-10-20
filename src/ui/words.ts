@@ -33,6 +33,10 @@ export function plainLabel(f: Finding): string {
       return 'Halos next to edges';
     case 'grain':
       return 'Put back grain';
+    case 'detail':
+      return f.details.mode === 'sharp' ? 'Oversharpened' : 'Too smooth (fine detail missing)';
+    case 'banding':
+      return 'Banding in smooth areas';
   }
 }
 
@@ -70,6 +74,16 @@ export function plainDescription(f: Finding): string {
       return `noise next to hard edges is ${fmt(f.details.ratio, 1)}× the grain elsewhere; this fix smooths the band beside edges by ${Math.round(f.details.amount * 100)} %`;
     case 'grain':
       return `fine grain of ${fmt(f.details.targetLevels, 1)} levels added wherever the cleaned photo is smoother than that (the photo had ${fmt(f.details.baseLevels, 1)}), so it doesn't look like plastic`;
+    case 'detail': {
+      const d = f.details;
+      if (d.mode === 'sharp') return `fine detail is ${fmt(10 ** (d.excessDb / 20), 1)}× stronger than a camera photo of this scene would have: outlines and crunchy texture from sharpening; this fix tones it down`;
+      return `fine detail is at ${fmt(100 * 10 ** (-d.deficitDb / 20), 0)} % of what a camera photo of this scene would have: smoothed, denoised or upscaled; this fix brings it back by up to ${fmt(10 ** (d.maxBoostDb / 20), 1)}×`;
+    }
+    case 'banding': {
+      const d = f.details;
+      const how = d.strengthLevels >= 0.4 ? 'clearly visible' : d.strengthLevels >= 0.2 ? 'visible' : 'faint';
+      return `${how} steps of ${d.stepLevels} level${d.stepLevels === 1 ? '' : 's'} in smooth gradients (skies, walls, shadows), in ${fmt(d.fraction * 100, 0)} % of the photo`;
+    }
   }
 }
 
@@ -100,6 +114,12 @@ export function plainFix(f: Finding): string {
       return 'The colour layer is smoothed where it is blotchy, guided by brightness so colour never bleeds across an edge. Brightness detail is untouched.';
     case 'ringing':
       return 'Only the band next to hard edges is smoothed, with an edge-keeping filter; the edge itself and everything else stay as they are.';
+    case 'detail':
+      return f.details.mode === 'sharp'
+        ? 'The detail bands that sharpening pushed up are brought back down to where a camera photo of this scene would sit. Coarse shapes and colour are untouched.'
+        : 'The fine detail bands are raised toward where a camera photo of this scene would sit, judged against the photo’s own coarser detail. Only brightness detail changes; nothing past what a re-save keeps is boosted.';
+    case 'banding':
+      return 'Inside the banded areas only, the steps are smoothed back into an even ramp with an edge-keeping filter (real edges stay), and a very fine dither is added so saving to 8 bits does not cut new steps.';
     case 'grain':
       return 'Photon-like grain, a little stronger in the shadows and fading out near white, with a touch of colour, is added only where the photo is now smoother than the amount set. Textured areas keep their own detail. Coarse enough to come through a re-save.';
   }

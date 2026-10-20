@@ -24,7 +24,7 @@ export function grainShape(v: number): number {
 }
 
 /** A unit-variance field correlated over about one pixel: white noise through a 3×3 [1 2 1] kernel. */
-function correlatedField(w: number, h: number, seed: number, radius: number): Float32Array {
+export function correlatedField(w: number, h: number, seed: number, radius: number): Float32Array {
   const g = gaussian(rng(seed));
   const white = new Float32Array(w * h);
   for (let i = 0; i < white.length; i++) white[i] = g();

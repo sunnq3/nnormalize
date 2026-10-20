@@ -4,8 +4,9 @@
  */
 
 import type { Analysis, AnalysisOptions, CleanupLevel, Finding, PeriodicMethod } from '../analysis/types';
+import type { FixSurvival } from '../analysis/survival';
 import { EngineClient } from '../engine/client';
-import { defaultBudget, type Budget, type LayerSetting, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
+import { defaultBudget, type Budget, type LayerSetting, type LiveReport, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
 import type { JpegExportOptions } from '../io/encode';
 import { PROFILES, resolveProfile, type ProfileId } from '../engine/profiles';
 import { stageSorted } from '../engine/engine';
@@ -78,6 +79,13 @@ export class App {
   private exportEl!: HTMLElement;
   private settingsEl!: HTMLElement;
   private scrollToReport = false;
+  private liveEl!: HTMLElement;
+  private liveTimer: ReturnType<typeof setTimeout> | null = null;
+  private liveRunning = false;
+  private liveDirty = false;
+  private liveReport: LiveReport | null = null;
+  private liveError = '';
+  private liveCollapsed = false;
   private sourceEl!: HTMLElement;
   private analysisEl!: HTMLElement;
   private recipeInput!: HTMLInputElement;
@@ -243,6 +251,13 @@ export class App {
     this.detailEl = el('div', { class: 'detail' });
     this.exportEl = el('div', { class: 'export' });
     this.settingsEl = el('div', { class: 'settings' });
+    this.liveEl = el('div', { class: 'livecheck' });
+    try {
+      this.liveCollapsed = localStorage.getItem('nnormalize.liveCollapsed') === '1';
+    } catch {
+      /* storage may be unavailable */
+    }
+    this.exportEl.addEventListener('change', () => this.scheduleLive());
     const step = (n: number, title: string, hint: string, ...body: (HTMLElement | string)[]): HTMLElement =>
       el('section', { class: 'step' }, el('h2', {}, el('span', { class: 'num' }, String(n)), title), hint ? el('div', { class: 'intro' }, hint) : '', ...body);
     const more = el('details', { class: 'more' }, el('summary', {}, 'More: spectrum, analysis settings, recipes and batch'));
@@ -267,8 +282,9 @@ export class App {
       step(1, 'Photo', '', this.sourceEl),
       step(2, 'How far, and where it is going', '', this.settingsEl),
       step(3, 'Problems found', 'Ticked problems get fixed. Click one to adjust its fix or hold it back in places.', this.findingsEl),
-      step(4, 'Save and check', '', this.exportEl),
+      step(4, 'Save', '', this.exportEl),
       el('section', {}, more),
+      this.liveEl,
     );
     const handle = el('div', { class: 'side-handle', title: 'Drag to resize the panel' });
     let drag: { x: number; w: number } | null = null;
@@ -307,6 +323,115 @@ export class App {
     this.renderFindings();
     this.renderDetail();
     this.renderExport();
+    this.renderLive();
+  }
+
+  // --- live check ------------------------------------------------------------------
+  /** Re-run the live check a moment after the last change. */
+  private scheduleLive(): void {
+    if (!this.analysis) return;
+    this.liveDirty = true;
+    if (this.liveTimer) clearTimeout(this.liveTimer);
+    this.liveTimer = setTimeout(() => void this.runLive(), 700);
+    this.renderLive();
+  }
+
+  private async runLive(): Promise<void> {
+    this.liveTimer = null;
+    if (!this.analysis || this.liveRunning) return;
+    // wait for fixes that are still being computed; their completion schedules another run
+    for (const st of this.layers.values()) if (st.building) return;
+    for (const f of this.analysis.findings) if (f.enabled && !this.layers.has(f.id)) return; // not started yet
+    this.liveDirty = false;
+    this.liveRunning = true;
+    this.liveError = '';
+    this.renderLive();
+    try {
+      this.liveReport = await this.client.liveCheck(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions);
+    } catch (e) {
+      this.liveError = e instanceof Error ? e.message : String(e);
+    } finally {
+      this.liveRunning = false;
+    }
+    this.renderLive();
+    if (this.liveDirty && !this.liveTimer) this.liveTimer = setTimeout(() => void this.runLive(), 200);
+  }
+
+  private renderLive(): void {
+    const box = this.liveEl;
+    if (!box) return;
+    box.innerHTML = '';
+    if (!this.analysis) {
+      box.style.display = 'none';
+      return;
+    }
+    box.style.display = '';
+    const r = this.liveReport;
+    const state = this.liveRunning ? 'checking…' : this.liveDirty ? 'waiting for you to stop…' : this.liveError ? 'check failed' : r ? 'up to date' : '';
+    const fixes = r?.survival.fixes ?? [];
+    const lost = fixes.filter((f) => f.verdict === 'lost').length;
+    const partly = fixes.filter((f) => f.verdict === 'partly').length;
+    const verdict = !r ? 'Checking what a downloader gets…' : !fixes.length ? 'Nothing ticked to check.' : lost ? `${lost} fix${lost > 1 ? 'es' : ''} lost after the re-save` : partly ? `${partly} fix${partly > 1 ? 'es' : ''} only partly kept` : 'Every fix holds after the re-save';
+    const head = el(
+      'div',
+      {
+        class: 'livehead',
+        onclick: () => {
+          this.liveCollapsed = !this.liveCollapsed;
+          try {
+            localStorage.setItem('nnormalize.liveCollapsed', this.liveCollapsed ? '1' : '0');
+          } catch {
+            /* storage may be unavailable */
+          }
+          this.renderLive();
+        },
+        title: 'Click to show or hide the table',
+      },
+      el('span', { class: `dot ${!r ? '' : lost ? 'lost' : partly ? 'partly' : 'survives'}` }),
+      el('b', {}, verdict),
+      el('span', { class: `state${this.liveRunning || this.liveDirty ? ' busy' : ''}` }, state),
+      el('span', { class: 'chev' }, this.liveCollapsed ? '▴' : '▾'),
+    );
+    box.appendChild(head);
+    if (this.liveCollapsed) return;
+    if (this.liveError) box.appendChild(el('div', { class: 'note' }, this.liveError));
+    if (!r) return;
+    box.appendChild(el('div', { class: 'livesub' }, `After ${r.checkLabel}: what someone who downloads it gets, next to the untouched photo given the same re-save.`));
+    if (fixes.length) box.appendChild(this.survivalTable(fixes));
+    const notes = fixes.filter((f) => f.verdict !== 'survives');
+    if (notes.length) {
+      const ul = el('ul');
+      for (const fx of notes) {
+        const f = this.analysis.findings.find((x) => x.id === fx.id);
+        ul.appendChild(el('li', {}, `${f ? plainLabel(f) : fx.label}: ${fx.note}`));
+      }
+      box.appendChild(ul);
+    }
+    const where = r.region.full ? 'Checked on the whole photo' : `Checked on the centre ${r.region.w} × ${r.region.h} px of the photo`;
+    box.appendChild(el('div', { class: 'livesub' }, `${where}, in ${(r.ms / 1000).toFixed(1)} s. File about ${Math.round(r.bytesEstimate / 1024)} kB. Saving checks the whole photo.`));
+  }
+
+  /** The fix | untouched | yours | kept table, shared by the live check and the save report. */
+  private survivalTable(fixes: FixSurvival[]): HTMLElement {
+    const tbl = el('table', { class: 'survival' });
+    tbl.appendChild(el('tr', {}, el('th', {}, 'fix'), el('th', {}, 'untouched'), el('th', {}, 'yours'), el('th', {}, 'kept')));
+    for (const fx of fixes) {
+      const f = this.analysis?.findings.find((x) => x.id === fx.id);
+      const name = f ? plainLabel(f) : fx.label;
+      const unit = fx.unit === 'pixels' ? '' : fx.unit === 'dB' ? ' dB' : ' lv';
+      const digits = fx.unit === 'pixels' ? 0 : fx.unit === 'dB' ? 1 : 2;
+      tbl.appendChild(
+        el(
+          'tr',
+          { class: fx.verdict, title: fx.note, onclick: () => this.select(fx.id) },
+          el('td', {}, name),
+          el('td', {}, `${fmt(fx.sourceOnDest, digits)}${unit}`),
+          el('td', {}, `${fmt(fx.resultOnDest, digits)}${unit}`),
+          el('td', {}, fx.verdict === 'survives' ? 'yes' : fx.verdict === 'partly' ? `${Math.round(fx.retained * 100)} %` : 'no'),
+        ),
+      );
+    }
+    return tbl;
   }
 
   /** Step 2: the two choices that drive everything else. */
@@ -332,6 +457,7 @@ export class App {
       this.report = null;
       profHint.textContent = PROFILES[this.profileId].hint;
       this.renderExport();
+      this.scheduleLive();
       if (this.profileId === 'reddit' && (this.level === 'standard' || this.level === 'gentle')) this.setStatus('Tip: Strong clean-up is the better match for Reddit; at Standard the grain looks unchanged after their compression.');
     });
     box.appendChild(el('div', { class: 'row wide', title: 'Decides how the file is written and what the check simulates' }, el('span', {}, 'Going to'), sel));
@@ -431,6 +557,7 @@ export class App {
 
   private queueRender(): void {
     if (this.viewer.mode !== 'posted' && this.viewer.mode !== 'posted-source') this.checked = false;
+    this.scheduleLive();
     this.renderQueued = true;
     if (this.rendering) return;
     void this.flushRender();
@@ -537,6 +664,8 @@ export class App {
   private async afterLoad(info: LoadedInfo): Promise<void> {
     this.info = info;
     this.analysis = null;
+    this.liveReport = null;
+    this.liveDirty = false;
     this.layers.clear();
     this.masks.clear();
     this.selected = null;
@@ -726,7 +855,18 @@ export class App {
       });
       box.appendChild(el('div', { class: 'row', title: '0 only levels the grain; higher removes it everywhere' }, el('span', {}, 'Remove grain'), red, rv));
     }
-    if (f.kind === 'chroma' || f.kind === 'ringing') {
+    if (f.kind === 'detail' && f.details.mode === 'smooth') {
+      const mb = el('input', { type: 'range', min: '2', max: '12', value: String(Math.round(f.details.maxBoostDb)) }) as HTMLInputElement;
+      const label = (db: number): string => `${fmt(10 ** (db / 20), 1)}×`;
+      const mv = el('span', { class: 'val' }, label(f.details.maxBoostDb));
+      mb.addEventListener('input', () => (mv.textContent = label(Number(mb.value))));
+      mb.addEventListener('change', () => {
+        f.details.maxBoostDb = Number(mb.value);
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: 'The most the fine detail may be raised. Higher brings back more, and more of whatever noise is there' }, el('span', {}, 'Most it may add'), mb, mv));
+    }
+    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding') {
       const am = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.amount * 100)) }) as HTMLInputElement;
       const av = el('span', { class: 'val' }, `${Math.round(f.details.amount * 100)} %`);
       am.addEventListener('input', () => (av.textContent = `${am.value} %`));
@@ -734,7 +874,7 @@ export class App {
         f.details.amount = Number(am.value) / 100;
         void this.rebuildFrom(f);
       });
-      box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Remove'), am, av));
+      box.appendChild(el('div', { class: 'row' }, el('span', {}, f.kind === 'detail' ? 'Amount' : f.kind === 'banding' ? 'Smooth' : 'Remove'), am, av));
     }
     if (f.kind === 'grain') {
       const am = el('input', { type: 'range', min: '5', max: '60', value: String(Math.round(f.details.targetLevels * 10)) }) as HTMLInputElement;
@@ -884,6 +1024,19 @@ export class App {
       fact('blue–yellow noise', `${fmt(f.details.sigmaCbLevels, 2)} levels`);
       fact('red–green noise', `${fmt(f.details.sigmaCrLevels, 2)} levels`);
       fact('affected', `${fmt(f.details.fraction * 100, 0)} % of blocks`);
+    } else if (f.kind === 'detail') {
+      const d = f.details;
+      fact(d.mode === 'sharp' ? 'above the reference' : 'below the reference', `${fmt(d.mode === 'sharp' ? d.excessDb : d.deficitDb, 1)} dB in the fine band`);
+      fact('scene falls off at', `${fmt(-d.line.slope / 10, 2)} (power ∝ 1/f^this)`);
+      const at = (fr: number): string => {
+        const i = Math.max(0, Math.min(d.f.length - 1, Math.round(fr * d.f.length * 2) - 1));
+        return `${fmt(d.measured[i] - d.reference[i], 1)} dB`;
+      };
+      fact('fine detail vs reference', `${at(0.12)} · ${at(0.2)} · ${at(0.3)} (at 8, 5, 3 px)`);
+    } else if (f.kind === 'banding') {
+      fact('step', `${f.details.stepLevels} level${f.details.stepLevels === 1 ? '' : 's'}`);
+      fact('visible steps', `${fmt(f.details.strengthLevels, 2)} levels`);
+      fact('area', `${fmt(f.details.fraction * 100, 0)} % of the photo`);
     } else if (f.kind === 'grain') {
       fact('photo had', `${fmt(f.details.baseLevels, 2)} levels`);
       fact('ends up with', `${fmt(f.details.targetLevels, 1)} levels`);
@@ -1066,7 +1219,7 @@ export class App {
 
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(true), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
-    actions.appendChild(el('button', { onclick: () => void this.doExport(false), disabled: this.analysis ? undefined : '', title: 'Run the check and show the As posted view without downloading' }, 'Check only'));
+    actions.appendChild(el('button', { onclick: () => void this.doExport(false), disabled: this.analysis ? undefined : '', title: 'Check the whole photo (the live check below looks at the centre) and show the As posted view, without downloading' }, 'Full check'));
     actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadRecipe(), disabled: this.analysis ? undefined : '', title: 'Everything you set here, as a file you can load for another photo' }, 'Save settings file'));
     box.appendChild(actions);
 
@@ -1091,22 +1244,7 @@ export class App {
     const box = el('div', { class: `report ${r.pass ? 'pass' : 'fail'}` });
     box.appendChild(el('div', { class: 'verdict' }, r.pass ? `After ${r.checkLabel}: every fix holds` : `After ${r.checkLabel}: not everything holds`));
     box.appendChild(el('div', { class: 'intro' }, 'What a downloader gets, compared with the untouched photo given the same re-save. Use the As posted view and Split to see it.'));
-    const tbl = el('table', { class: 'survival' });
-    tbl.appendChild(el('tr', {}, el('th', {}, 'fix'), el('th', {}, 'untouched'), el('th', {}, 'yours'), el('th', {}, 'kept')));
-    for (const fx of r.survival.fixes) {
-      const f = this.analysis?.findings.find((x) => x.id === fx.id);
-      const name = f ? plainLabel(f) : fx.label;
-      const unit = fx.unit === 'pixels' ? '' : ' lv';
-      const row = el(
-        'tr',
-        { class: fx.verdict, title: fx.note },
-        el('td', {}, name),
-        el('td', {}, `${fmt(fx.sourceOnDest, fx.unit === 'pixels' ? 0 : 2)}${unit}`),
-        el('td', {}, `${fmt(fx.resultOnDest, fx.unit === 'pixels' ? 0 : 2)}${unit}`),
-        el('td', {}, fx.verdict === 'survives' ? 'yes' : fx.verdict === 'partly' ? `${Math.round(fx.retained * 100)} %` : 'no'),
-      );
-      tbl.appendChild(row);
-    }
+    const tbl = this.survivalTable(r.survival.fixes);
     box.appendChild(tbl);
     const notes: string[] = [];
     for (const fx of r.survival.fixes) {

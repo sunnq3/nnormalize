@@ -629,3 +629,70 @@ details.more > summary {
   font-size: 14px;
   padding: 8px 14px;
 }
+
+/* ---- live check, pinned to the bottom of the side panel ---- */
+.side > * {
+  flex-shrink: 0;
+}
+.livecheck {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  background: var(--panel-raised);
+  border-top: 1px solid var(--line-strong);
+  box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.25);
+  padding: 8px 12px 10px;
+  max-height: 45vh;
+  overflow-y: auto;
+  z-index: 2;
+}
+.livecheck .livehead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.livecheck .livehead b {
+  flex: 1;
+  font-weight: 600;
+}
+.livecheck .dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--ink-faint);
+  flex: none;
+}
+.livecheck .dot.survives {
+  background: #6cc28a;
+}
+.livecheck .dot.partly {
+  background: var(--amber);
+}
+.livecheck .dot.lost {
+  background: #e06c5a;
+}
+.livecheck .state {
+  color: var(--ink-faint);
+  font-size: 12px;
+}
+.livecheck .state.busy {
+  color: var(--amber);
+}
+.livecheck .chev {
+  color: var(--ink-faint);
+}
+.livecheck .livesub {
+  color: var(--ink-faint);
+  font-size: 12px;
+  margin: 6px 0;
+}
+.livecheck ul {
+  margin: 6px 0;
+  padding-left: 18px;
+  color: var(--ink-soft);
+}
+.livecheck table.survival tr {
+  cursor: pointer;
+}

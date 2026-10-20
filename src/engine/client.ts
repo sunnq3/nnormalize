@@ -6,7 +6,7 @@ import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
 import { createEngineWorker } from './workerFactory';
 import type { ProfileId } from './profiles';
 import type { JpegExportOptions } from '../io/encode';
-import type { Budget, LayerSetting, LayerStats, LoadedInfo, RenderRequest, RenderResult, Request, Response, RoundTripReport, SynthRequest } from './protocol';
+import type { Budget, LayerSetting, LayerStats, LiveReport, LoadedInfo, RenderRequest, RenderResult, Request, Response, RoundTripReport, SynthRequest } from './protocol';
 
 type RequestBody = Request extends infer R ? (R extends { id: number } ? Omit<R, 'id'> : never) : never;
 
@@ -110,6 +110,12 @@ export class EngineClient {
     const r = await this.send({ type: 'export', layers, findings, master, profile, options, budget, analysisOptions }, onProgress);
     if (r.type !== 'export') throw new Error('unexpected reply');
     return { jpeg: r.jpeg, report: r.report };
+  }
+
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profile: ProfileId, options: JpegExportOptions): Promise<LiveReport> {
+    const r = await this.send({ type: 'liveCheck', layers, findings, master, profile, options });
+    if (r.type !== 'live') throw new Error('unexpected reply');
+    return r.report;
   }
 
   async verifyResult(layers: LayerSetting[], master: number, analysisOptions: Partial<AnalysisOptions>, onProgress?: (stage: string, fraction: number) => void): Promise<Analysis> {

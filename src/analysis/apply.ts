@@ -8,6 +8,8 @@
 import { deblockDelta } from '../dsp/blocks';
 import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr } from '../dsp/chroma';
 import { grainDelta } from '../dsp/grain';
+import { debandDelta } from '../dsp/banding';
+import { bandGains, detailBalance, detailDelta, radialProfile, wantedGainDb } from '../dsp/spectrum';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
 import { median9 } from '../dsp/hotpixels';
 import { denoiseDelta, noiseMap, noiseModel, regrainDelta } from '../dsp/noise';
@@ -76,6 +78,28 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
       return d;
     });
     progress(1);
+    return deltas as [Plane, Plane, Plane];
+  }
+  if (finding.kind === 'detail') {
+    // brightness detail only: the same delta goes to all three channels
+    const d = finding.details;
+    const Y = lumaOf(planes);
+    const prof = radialProfile(Y);
+    const bal = detailBalance(prof, d.grainSigma, d.line);
+    const gains = bandGains(bal.f, wantedGainDb(bal, d.mode, d.maxBoostDb), d.amount);
+    progress(0.5);
+    const delta = detailDelta(Y, gains);
+    progress(1);
+    return [delta, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }];
+  }
+  if (finding.kind === 'banding') {
+    const d = finding.details;
+    const bands = { block: d.block, bw: d.bw, bh: d.bh, banded: d.banded, fraction: d.fraction, stepLevels: d.stepLevels };
+    const deltas = planes.map((p, c) => {
+      const r = debandDelta(p, bands, { amount: d.amount, stepLevels: d.stepLevels, seed: 0xbad5 });
+      progress((c + 1) / 3);
+      return r;
+    });
     return deltas as [Plane, Plane, Plane];
   }
   if (finding.kind === 'grain') {

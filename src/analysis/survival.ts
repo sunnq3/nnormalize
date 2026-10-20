@@ -15,6 +15,8 @@
 import { detectBlockGrid } from '../dsp/blocks';
 import { measureChromaNoise, measureRinging, toYCbCr } from '../dsp/chroma';
 import { median9 } from '../dsp/hotpixels';
+import { bandingStrength } from '../dsp/banding';
+import { detailBalance, radialProfile } from '../dsp/spectrum';
 import { noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
 import { lumaPlane, type Plane } from '../dsp/plane';
@@ -51,18 +53,43 @@ function verdictFor(retained: number): Verdict {
   return 'lost';
 }
 
-export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, Plane, Plane], resDest: [Plane, Plane, Plane], findings: Finding[]): SurvivalReport {
-  const lumS = lumaPlane(source[0], source[1], source[2]);
-  const lumSD = lumaPlane(srcDest[0], srcDest[1], srcDest[2]);
+export interface SurvivalOptions {
+  /** the planes are a crop of the photo at this origin (multiples of 32), for findings stored in whole-photo coordinates */
+  crop?: { x0: number; y0: number; fullW: number };
+  /** values for the untouched photo and its re-saved copy, kept between calls on the same crop and destination */
+  cache?: Map<string, number>;
+}
+
+export function measureSurvival(
+  source: [Plane, Plane, Plane],
+  srcDest: [Plane, Plane, Plane],
+  resDest: [Plane, Plane, Plane],
+  findings: Finding[],
+  opts: SurvivalOptions = {},
+): SurvivalReport {
+  const cache = opts.cache ?? new Map<string, number>();
+  const memo = (key: string, fn: () => number): number => {
+    const v = cache.get(key);
+    if (v !== undefined) return v;
+    const r = fn();
+    cache.set(key, r);
+    return r;
+  };
+  let lumSc: Plane | null = null;
+  let lumSDc: Plane | null = null;
+  const lumSf = (): Plane => (lumSc ??= lumaPlane(source[0], source[1], source[2]));
+  const lumSDf = (): Plane => (lumSDc ??= lumaPlane(srcDest[0], srcDest[1], srcDest[2]));
   const lumRD = lumaPlane(resDest[0], resDest[1], resDest[2]);
-  const grid = subsampleGrid(tileGrid(lumS.w, lumS.h, 1024), 16);
+  const grid = subsampleGrid(tileGrid(lumRD.w, lumRD.h, 1024), 16);
   const fixes: FixSurvival[] = [];
 
-  const gridS = detectBlockGrid(lumSD);
   const gridR = detectBlockGrid(lumRD);
-  const stepS = Math.max(gridS.stepX, gridS.stepY) * 255;
+  const stepS = memo('step:sd', () => {
+    const g = detectBlockGrid(lumSDf());
+    return Math.max(g.stepX, g.stepY) * 255;
+  });
   const stepR = Math.max(gridR.stepX, gridR.stepY) * 255;
-  const sigS = noiseModel(noiseMap(lumSD, 32)).globalSigma * 255;
+  const sigS = memo('sigma:sd', () => noiseModel(noiseMap(lumSDf(), 32)).globalSigma * 255);
   const sigR = noiseModel(noiseMap(lumRD, 32)).globalSigma * 255;
 
   for (const f of findings) {
@@ -73,8 +100,8 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
           const m = measurePattern(p, grid, f.details.u, f.details.v, { refine: false, searchGrid: grid, measureGrid: grid });
           return Math.max(m.amplitude, m.amplitudeP90) * 255;
         };
-        const a0 = amp(lumS);
-        const a1 = amp(lumSD);
+        const a0 = memo(`${f.id}:s`, () => amp(lumSf()));
+        const a1 = memo(`${f.id}:sd`, () => amp(lumSDf()));
         const a2 = amp(lumRD);
         const retained = a1 > 0.05 ? Math.max(0, Math.min(1, 1 - a2 / a1)) : 1;
         // under one level nobody can see a pattern, whatever share of it that is
@@ -101,8 +128,10 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
         break;
       }
       case 'jpeg-grid': {
-        const g0 = detectBlockGrid(lumS);
-        const s0 = Math.max(g0.stepX, g0.stepY) * 255;
+        const s0 = memo('step:s', () => {
+          const g0 = detectBlockGrid(lumSf());
+          return Math.max(g0.stepX, g0.stepY) * 255;
+        });
         const retained = stepS > 0.1 ? Math.max(0, Math.min(1, 1 - stepR / stepS)) : 1;
         const v = stepR < 0.5 ? 'survives' : verdictFor(retained);
         fixes.push({
@@ -125,7 +154,7 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
         break;
       }
       case 'noise': {
-        const sig0 = noiseModel(noiseMap(lumS, 32)).globalSigma * 255;
+        const sig0 = memo('sigma:s', () => noiseModel(noiseMap(lumSf(), 32)).globalSigma * 255);
         // grain deliberately put back afterwards is not grain that came back
         const putBack = findings.find((g) => g.kind === 'grain' && g.enabled);
         const wantBack = putBack && putBack.kind === 'grain' ? putBack.details.targetLevels : 0;
@@ -136,6 +165,7 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
         if (f.details.reduction > 0) {
           retained = sigS > 0.05 ? Math.max(0, Math.min(1, (sigS - sigR) / Math.max(1e-6, sigS - target))) : 1;
           if (sigS - target < 0.3) retained = 1; // nothing to remove beyond what is put back
+          if (wantBack > 0 && sigR <= wantBack * 1.25) retained = 1; // what is left is the grain put back on purpose
           note = retained >= 0.8 ? (wantBack ? 'grain is reduced, then put back at the amount set.' : 'grain stays reduced.') : retained >= 0.35 ? 'some grain shows again; the re-save adds noise of its own.' : 'the re-save adds about as much noise as was removed.';
         } else {
           retained = 1;
@@ -150,8 +180,8 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
           const m = measureChromaNoise(Yc, Cb, Cr, 32, f.details.thresholdLevels);
           return Math.max(m.sigmaCb, m.sigmaCr) * 255;
         };
-        const c0 = cn(source);
-        const c1 = cn(srcDest);
+        const c0 = memo(`${f.id}:s`, () => cn(source));
+        const c1 = memo(`${f.id}:sd`, () => cn(srcDest));
         const c2 = cn(resDest);
         const target = c1 * (1 - f.details.amount);
         const retained = c1 > 0.05 ? Math.max(0, Math.min(1, (c1 - c2) / Math.max(1e-6, c1 - target))) : 1;
@@ -172,8 +202,8 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
       }
       case 'ringing': {
         const rg = (p: Plane): number => measureRinging(p, f.details.edgeThreshold, 8).haloLevels;
-        const h0 = rg(lumS);
-        const h1 = rg(lumSD);
+        const h0 = memo(`${f.id}:s`, () => rg(lumSf()));
+        const h1 = memo(`${f.id}:sd`, () => rg(lumSDf()));
         const h2 = rg(lumRD);
         const target = h1 * (1 - f.details.amount);
         const retained = h1 > 0.05 ? Math.max(0, Math.min(1, (h1 - h2) / Math.max(1e-6, h1 - target))) : 1;
@@ -213,20 +243,91 @@ export function measureSurvival(source: [Plane, Plane, Plane], srcDest: [Plane, 
         });
         break;
       }
+      case 'detail': {
+        const d = f.details;
+        const bal = (p: Plane) => detailBalance(radialProfile(p), d.grainSigma, d.line);
+        const key = d.mode === 'sharp' ? 'excessDb' : 'deficitDb';
+        const v0 = memo(`${f.id}:s`, () => Math.max(0, bal(lumSf())[key]));
+        const v1 = memo(`${f.id}:sd`, () => Math.max(0, bal(lumSDf())[key]));
+        const v2 = Math.max(0, bal(lumRD)[key]);
+        const retained = v1 > 0.3 ? Math.max(0, Math.min(1, 1 - v2 / v1)) : 1;
+        const v: Verdict = v2 < 2 || retained >= 0.6 ? 'survives' : retained >= 0.25 ? 'partly' : 'lost';
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'dB',
+          source: v0,
+          sourceOnDest: v1,
+          resultOnDest: v2,
+          retained,
+          verdict: v,
+          note:
+            v === 'survives'
+              ? d.mode === 'sharp'
+                ? 'detail stays at a natural level.'
+                : 'fine detail comes through the re-save.'
+              : d.mode === 'sharp'
+                ? 'the re-save leaves some of the oversharpening.'
+                : 'the re-save smooths away part of the detail brought back; raise the most it may add if the copy looks soft.',
+        });
+        break;
+      }
+      case 'banding': {
+        const d = f.details;
+        let banded = d.banded;
+        let bw = d.bw;
+        let bh = d.bh;
+        if (opts.crop) {
+          const bx0 = Math.round(opts.crop.x0 / d.block);
+          const by0 = Math.round(opts.crop.y0 / d.block);
+          bw = Math.floor(lumRD.w / d.block);
+          bh = Math.floor(lumRD.h / d.block);
+          banded = new Uint8Array(bw * bh);
+          for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) if (by0 + y < d.bh && bx0 + x < d.bw) banded[y * bw + x] = d.banded[(by0 + y) * d.bw + bx0 + x];
+        }
+        let any = 0;
+        for (let i = 0; i < banded.length; i++) any += banded[i];
+        if (!any) break;
+        const str = (p: Plane): number => bandingStrength(p, banded, bw, bh, d.block);
+        const b0 = memo(`${f.id}:s`, () => str(lumSf()));
+        const b1 = memo(`${f.id}:sd`, () => str(lumSDf()));
+        const b2 = str(lumRD);
+        const retained = b1 > 0.02 ? Math.max(0, Math.min(1, 1 - b2 / b1)) : 1;
+        const v: Verdict = b2 < 0.12 || retained >= 0.7 ? 'survives' : retained >= 0.3 ? 'partly' : 'lost';
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: b0,
+          sourceOnDest: b1,
+          resultOnDest: b2,
+          retained,
+          verdict: v,
+          note: v === 'survives' ? 'gradients stay smooth.' : 'the re-save cuts some steps back into the gradients; its own blocks show in smooth areas.',
+        });
+        break;
+      }
       case 'hotpixels': {
-        const idx = f.details.indices;
-        const w = lumS.w;
+        const all = f.details.indices;
+        const fullW = opts.crop?.fullW ?? lumRD.w;
+        const ox = opts.crop?.x0 ?? 0;
+        const oy = opts.crop?.y0 ?? 0;
+        const w = lumRD.w;
+        const idx: number[] = [];
+        for (const i of all) {
+          const x = (i % fullW) - ox;
+          const y = Math.floor(i / fullW) - oy;
+          if (x >= 1 && y >= 1 && x < w - 1 && y < lumRD.h - 1) idx.push(y * w + x);
+        }
         const still = (p: Plane): number => {
           let n = 0;
-          for (const i of idx) {
-            const x = i % w;
-            const y = (i - x) / w;
-            if (x < 1 || y < 1 || x >= w - 1 || y >= p.h - 1) continue;
-            if (Math.abs(p.data[i] - median9(p.data, i, w)) > 0.06) n++;
-          }
+          for (const i of idx) if (Math.abs(p.data[i] - median9(p.data, i, w)) > 0.06) n++;
           return n;
         };
-        const n1 = still(lumSD);
+        if (!idx.length) break;
+        const n1 = memo(`${f.id}:sd`, () => still(lumSDf()));
         const n2 = still(lumRD);
         const retained = n1 > 0 ? Math.max(0, Math.min(1, 1 - n2 / n1)) : 1;
         fixes.push({

@@ -18,12 +18,12 @@ import { resolveProfile, type ProfileId } from './profiles';
 import { decodeImage, type SourceImage, type SourceMeta } from '../io/decode';
 import { parseJpeg } from '../io/jpegParse';
 import { psnr, rng, synthesize } from '../synth/generate';
-import type { Budget, LayerSetting, LayerStats, LoadedInfo, RenderRequest, RenderResult, RoundTripReport, SynthRequest } from './protocol';
+import type { Budget, LayerSetting, LayerStats, LiveReport, LoadedInfo, RenderRequest, RenderResult, RoundTripReport, SynthRequest } from './protocol';
 
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
 /** Order in which correction stages are applied; later stages are computed on earlier ones. */
-export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, noise: 4, chroma: 5, grain: 6 };
+export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, detail: 4, noise: 5, chroma: 6, banding: 7, grain: 8 };
 
 /** Findings in the order their layers should be built. */
 export function stageSorted<T extends { kind: Finding['kind'] }>(findings: T[]): T[] {
@@ -502,6 +502,85 @@ export class Engine {
     return out as [Plane, Plane, Plane];
   }
 
+  private grainScale = 1;
+  private liveCache: { key: string; srcDest: [Plane, Plane, Plane]; source: [Plane, Plane, Plane]; values: Map<string, number> } | null = null;
+
+  /**
+   * The live check: what a downloader would get, on a centred crop of up to
+   * 1536 px a side (the whole photo when it is smaller), written once at the
+   * destination's settings and put through its re-save. The untouched
+   * photo's side is kept between runs. Also tunes how much the grain put
+   * back has to be raised so the copy carries the amount set.
+   */
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions): Promise<LiveReport> {
+    if (!this.source || !this.analysis) throw new Error('analyse first');
+    const t0 = performance.now();
+    const profile = resolveProfile(profileId, customOptions);
+    const src = this.source;
+    const side = 1536;
+    const full = src.w <= 1600 && src.h <= 1600;
+    const cw = full ? src.w : Math.min(src.w, side);
+    const ch = full ? src.h : Math.min(src.h, side);
+    const x0 = full ? 0 : Math.floor((src.w - cw) / 2 / 32) * 32;
+    const y0 = full ? 0 : Math.floor((src.h - ch) / 2 / 32) * 32;
+    const crop = (useLayers: LayerSetting[], m: number): [Plane, Plane, Plane] =>
+      [0, 1, 2].map((c) => {
+        const data = new Float32Array(cw * ch);
+        this.compositeFull(c, x0, y0, cw, ch, useLayers, m, data);
+        for (let i = 0; i < data.length; i++) data[i] = data[i] < 0 ? 0 : data[i] > 1 ? 1 : data[i];
+        return { w: cw, h: ch, data };
+      }) as [Plane, Plane, Plane];
+
+    const key = `${profileId}:${JSON.stringify(profile.check.options)}:${x0},${y0},${cw},${ch}:${src.w}x${src.h}`;
+    if (!this.liveCache || this.liveCache.key !== key) {
+      const source = crop([], 1);
+      const srcDest = (await simulateReencode(source, profile.check.options)).planes;
+      this.liveCache = { key, source, srcDest, values: new Map() };
+    }
+    const cache = this.liveCache;
+
+    const grainWant = findings.find((f) => f.kind === 'grain' && f.enabled && layers.some((l) => l.id === f.id && l.strength > 0));
+    const want = grainWant && grainWant.kind === 'grain' ? grainWant.details.targetLevels : 0;
+    const opts = profile.encode;
+    // any change is re-rounded by the destination, so block boundaries are settled whenever something is fixed
+    const blockFixOn = layers.some((l) => l.strength > 0);
+    let survival!: ReturnType<typeof measureSurvival>;
+    let bytes = 0;
+    // a second round only when the grain put back came out well off the amount set
+    for (let round = 0; round < 2; round++) {
+      const useLayers = this.grainScale === 1 ? layers : layers.map((l) => (l.id === grainWant?.id ? { ...l, strength: l.strength * this.grainScale } : l));
+      const composed = crop(useLayers, master);
+      if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
+        const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
+        const r = settleBlocks(Y, opts.quality, { grainLevels: noiseMap(Y, 32).refSigma * 255, iterations: 2 });
+        const rgb = jpegYccToRgb(r.plane, Cb, Cr);
+        composed[0] = rgb[0];
+        composed[1] = rgb[1];
+        composed[2] = rgb[2];
+      }
+      const written = await simulateReencode(composed, { ...opts, fixedPointPasses: 0 });
+      bytes = written.bytes;
+      const resDest = (await simulateReencode(written.planes, profile.check.options)).planes;
+      survival = measureSurvival(cache.source, cache.srcDest, resDest, findings, { crop: full ? undefined : { x0, y0, fullW: src.w }, cache: cache.values });
+      // learn the grain scale (kept for the next check and for the save)
+      const g = survival.fixes.find((f) => f.kind === 'grain');
+      if (!g || want <= 0 || g.resultOnDest <= 0.05) break;
+      const off = g.resultOnDest / want;
+      if (off > 0.85 && off < 1.2) break;
+      const next = Math.max(0.5, Math.min(3, this.grainScale / off));
+      if (Math.abs(next - this.grainScale) < 0.05) break;
+      this.grainScale = next;
+    }
+    return {
+      survival,
+      checkLabel: profile.check.label,
+      region: { x0, y0, w: cw, h: ch, full },
+      bytesEstimate: Math.round(bytes * ((src.w * src.h) / (cw * ch))),
+      grainScale: this.grainScale,
+      ms: Math.round(performance.now() - t0),
+    };
+  }
+
   // --- export --------------------------------------------------------------
   async exportJpeg(
     layers: LayerSetting[],
@@ -523,7 +602,8 @@ export class Engine {
     // file is written once, the downloader's copy measured, and if the grain
     // there is short of the amount set, the grain is scaled up and the file
     // written again, so what was set is what the copy has.
-    let grainScale = 1;
+    // start from what the live check learned about how much grain the re-save keeps
+    let grainScale = this.grainScale;
     let composed!: [Plane, Plane, Plane];
     let settled: RoundTripReport['settled'] = null;
     let jpeg!: Uint8Array;
@@ -541,7 +621,8 @@ export class Engine {
       // put on that quality's coefficient grid with block boundaries settled,
       // so the destination's re-save cannot bring the steps back.
       settled = null;
-      const blockFixOn = findings.some((f) => f.kind === 'jpeg-grid' && f.enabled) && layers.some((l) => l.id === 'jpeg-grid' && l.strength > 0);
+      // any change is re-rounded by the destination, so block boundaries are settled whenever something is fixed
+    const blockFixOn = layers.some((l) => l.strength > 0);
       if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
         progress('settle', 0);
         const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
@@ -570,8 +651,9 @@ export class Engine {
       progress('check', 0.7);
       survival = measureSurvival(this.source.planes, srcDest, resDest, findings);
       const g = survival.fixes.find((f) => f.kind === 'grain');
-      if (round === 0 && g && want > 0 && g.resultOnDest > 0.05 && g.resultOnDest < 0.85 * want) {
-        grainScale = Math.min(2.5, want / g.resultOnDest);
+      if (round === 0 && g && want > 0 && g.resultOnDest > 0.05 && (g.resultOnDest < 0.85 * want || g.resultOnDest > 1.25 * want)) {
+        grainScale = Math.max(0.5, Math.min(3, (grainScale * want) / g.resultOnDest));
+        this.grainScale = grainScale;
         progress('regrain', 0);
         continue;
       }

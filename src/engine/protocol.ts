@@ -80,6 +80,17 @@ export interface RoundTripReport {
   budget: Budget;
 }
 
+/** The live check: survival on a crop, written once at the destination's settings. */
+export interface LiveReport {
+  survival: SurvivalReport;
+  checkLabel: string;
+  region: { x0: number; y0: number; w: number; h: number; full: boolean };
+  /** file size of the whole photo, estimated from the crop */
+  bytesEstimate: number;
+  grainScale: number;
+  ms: number;
+}
+
 export interface Budget {
   maxPeakDb: number; // no periodic finding above this excess (default 12) ...
   minPeakLevels: number; // ... unless its amplitude is below this many 8-bit levels (default 1: under one level nobody sees it)
@@ -119,6 +130,7 @@ export type Request =
       analysisOptions: Partial<AnalysisOptions>;
     }
   | { type: 'verifyResult'; id: number; layers: LayerSetting[]; master: number; analysisOptions: Partial<AnalysisOptions> }
+  | { type: 'liveCheck'; id: number; layers: LayerSetting[]; findings: Finding[]; master: number; profile: ProfileId; options: JpegExportOptions }
   | { type: 'presenceMask'; id: number; findingId: string }
   | { type: 'addPeak'; id: number; u: number; v: number }
   | { type: 'luminosityMask'; id: number; findingId: string; lo: number; hi: number; soft: number };
@@ -132,6 +144,7 @@ export type Response =
   | { type: 'render'; id: number; result: RenderResult }
   | { type: 'export'; id: number; jpeg: Uint8Array; report: RoundTripReport }
   | { type: 'verify'; id: number; analysis: Analysis }
+  | { type: 'live'; id: number; report: LiveReport }
   | { type: 'mask'; id: number; w: number; h: number; data: Uint8Array }
   | { type: 'finding'; id: number; finding: Finding }
   | { type: 'error'; id: number; message: string };
