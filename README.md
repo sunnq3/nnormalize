@@ -37,12 +37,14 @@ The site is served from the repository root on the main branch, so `npm run buil
 
 Drop a photo, or load the test image, which plants three known patterns, an 8×8 grid and a dozen hot pixels so you can see what the numbers look like when the answer is known.
 
-- **Clean-up level** (top bar): *Gentle* and *Standard* fix only what is clearly wrong and leave the grain alone. *Strong* and *Maximum* also remove grain everywhere (50 % / 80 %), blend block edges over the whole block, and smooth colour blotches and halos harder.
-- **Going to** (save panel): Reddit and sharing apps, master copy, or custom. "Save JPEG and check it" writes the file and runs the check; "Check only" runs the check without downloading.
+The side panel is the workflow, in four numbered steps: **1 Photo** (open or drop one), **2 How far, and where it is going**, **3 Problems found** (tick, untick, click to adjust), **4 Save and check**. The panel can be dragged wider. The spectrum, analysis thresholds, recipes and batch sit under *More* at the bottom.
+
+- **Clean-up** (step 2): *Gentle* and *Standard* fix only what is clearly wrong and leave the grain alone. *Strong* and *Maximum* also remove grain everywhere (50 % / 80 %), blend block edges over the whole block, smooth colour blotches and halos harder, and put a fine grain back.
+- **Going to** (step 2): Reddit and sharing apps, master copy, or custom. In step 4, "Save JPEG and check it" writes the file and runs the check; "Check only" runs the check without downloading.
 - **Views:** before, after, what changed (amplified by the slider), as posted. Split compares before and after, or the downloader's copy against the untouched photo's. Fit, 100 % and 200 % zoom; double-click toggles fit and 100 %.
 - **Brush:** with a problem selected, paint on the picture where its fix should be held back. "Only where it was found" and the brightness range seed the mask automatically.
 - **Spectrum:** hover for exact frequency, period, angle, lines per inch when the DPI is known, and dB over background. Click a ring to select that finding; "Add a peak by clicking" turns a click into a new finding measured like the rest.
-- **Selected fix:** strength, method, brush tools, "Where it was found", a brightness range. Technical numbers sit under *Measurements*. For *Put back grain*: the amount in levels (1.5 barely there, 3 a light film look) and how much colour is in it.
+- **A selected problem** opens its controls right under it: strength, method, and under "Hold it back in places" the brush, "Where it was found" and a brightness range. Technical numbers sit under *Measurements*. For *Put back grain*: the amount in levels (1.5 barely there, 3 a light film look) and how much colour is in it.
 - **Recipes:** save the findings, strengths, methods, masks, level and destination as JSON; load one to apply the same choices to another photo (patterns are matched by frequency). Batch runs a set of photos through analysis, recipe, export and check, downloading each result and a summary report.
 
 ## Precision

@@ -37,10 +37,11 @@ body {
 }
 
 #app {
+  --side-w: 520px;
   height: 100%;
   display: grid;
   grid-template-rows: 44px 1fr;
-  grid-template-columns: 1fr 420px;
+  grid-template-columns: 1fr var(--side-w);
   grid-template-areas:
     'top top'
     'view side';
@@ -357,14 +358,16 @@ input[type='number'] {
   min-width: 0;
   width: 100%;
 }
-.detail .facts {
+.detail .facts,
+.export .facts {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 2px 12px;
   margin: 6px 0 8px;
   color: var(--ink-soft);
 }
-.detail .facts b {
+.detail .facts b,
+.export .facts b {
   color: var(--ink);
   font-weight: 500;
 }
@@ -549,4 +552,80 @@ table.survival tr.partly td:last-child {
 }
 table.survival tr.lost td:last-child {
   color: var(--fail);
+}
+
+/* ---- stepped side panel ---- */
+.side {
+  position: relative;
+}
+.side-handle {
+  grid-area: side;
+  justify-self: start;
+  align-self: stretch;
+  width: 7px;
+  margin-left: -4px;
+  cursor: col-resize;
+  z-index: 3;
+}
+.side-handle:hover,
+.side-handle.dragging {
+  background: var(--amber);
+  opacity: 0.5;
+}
+.side section.step h2 {
+  font-size: 14px;
+}
+.side h2 .num {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--amber);
+  color: #1a1a1a;
+  font-size: 12px;
+  font-weight: 700;
+  margin-right: 8px;
+}
+.side h3 {
+  margin: 10px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.side h3 .sub {
+  color: var(--ink-faint);
+  font-weight: 400;
+  margin-left: 6px;
+}
+.settings .hint,
+.sourcebox .welcome {
+  color: var(--ink-faint);
+  margin: 2px 0 10px;
+}
+.sourcebox .welcome p {
+  margin: 0 0 8px;
+}
+.sourcebox .tools {
+  margin-bottom: 8px;
+}
+.findings .detail {
+  margin: -4px 0 10px 24px;
+  padding: 8px 10px 4px;
+  border-left: 2px solid var(--amber);
+  background: var(--panel-raised);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.findings .detail .intro {
+  margin-top: 0;
+}
+details.more > summary {
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+.moreinner {
+  padding-top: 8px;
+}
+.export .actions .primary {
+  font-size: 14px;
+  padding: 8px 14px;
 }

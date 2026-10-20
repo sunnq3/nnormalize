@@ -76,6 +76,8 @@ export class App {
   private findingsEl!: HTMLElement;
   private detailEl!: HTMLElement;
   private exportEl!: HTMLElement;
+  private settingsEl!: HTMLElement;
+  private scrollToReport = false;
   private sourceEl!: HTMLElement;
   private analysisEl!: HTMLElement;
   private recipeInput!: HTMLInputElement;
@@ -124,8 +126,6 @@ export class App {
       { class: 'top' },
       el('span', { class: 'brand' }, 'nnormalize'),
       el('button', { onclick: () => this.fileInput.click() }, 'Open photo'),
-      el('button', { onclick: () => void this.loadTest() }, 'Test image'),
-      el('label', { class: 'level' }, 'Clean-up ', this.levelSelect),
       this.fileInput,
       this.status,
       el('div', { class: 'progress' }, this.progressBar),
@@ -207,7 +207,7 @@ export class App {
     });
 
     // side
-    this.sourceEl = el('div', { class: 'source' });
+    this.sourceEl = el('div', { class: 'sourcebox' });
     this.analysisEl = el('div', { class: 'detail' });
     this.recipeInput = el('input', { type: 'file', accept: '.json,application/json', style: 'display:none' }) as HTMLInputElement;
     this.recipeInput.addEventListener('change', () => {
@@ -239,49 +239,103 @@ export class App {
       },
       'Add a pattern by clicking',
     );
-    const help = el('details', { class: 'help' }, el('summary', {}, 'How to read this'));
-    help.appendChild(
-      el(
-        'div',
-        {},
-        el('p', {}, 'Open a photo. The tool looks for things that repeat (stripes, moiré, dot screens), the block grid left by earlier JPEG saves, uneven grain, and dead pixels. Each one becomes a line under “Problems found”; ticked lines get fixed.'),
-        el('p', {}, '“Levels” are brightness steps out of 255. A pattern 10 levels strong is obvious; 1 level is faint; 0.3 is invisible.'),
-        el('p', {}, 'The Clean-up setting at the top decides how far to go. Standard fixes what it finds without softening the photo. Strong and Maximum also remove grain and block edges everywhere, which is what makes a difference you can see after the photo is compressed again.'),
-        el('p', {}, 'Brush holds a fix back where you paint.'),
-        el('p', {}, '“Going to” decides how the file is written. For Reddit and most apps it is written at their own quality and settled so their re-save changes nothing; the As posted view shows exactly what a downloader will get, and Split puts the untouched photo through the same re-save for comparison.'),
-      ),
-    );
     this.findingsEl = el('div', { class: 'findings' });
     this.detailEl = el('div', { class: 'detail' });
     this.exportEl = el('div', { class: 'export' });
-    const side = el(
-      'div',
-      { class: 'side' },
-      el('section', {}, help),
-      el('section', {}, el('h2', {}, 'Problems found'), el('div', { class: 'intro' }, 'Ticked lines will be fixed. Click a line to adjust its fix.'), this.findingsEl),
-      el('section', {}, el('h2', {}, 'Selected fix'), this.detailEl),
-      el('section', {}, el('h2', {}, 'Save'), this.exportEl),
+    this.settingsEl = el('div', { class: 'settings' });
+    const step = (n: number, title: string, hint: string, ...body: (HTMLElement | string)[]): HTMLElement =>
+      el('section', { class: 'step' }, el('h2', {}, el('span', { class: 'num' }, String(n)), title), hint ? el('div', { class: 'intro' }, hint) : '', ...body);
+    const more = el('details', { class: 'more' }, el('summary', {}, 'More: spectrum, analysis settings, recipes and batch'));
+    more.appendChild(
       el(
-        'section',
-        {},
-        el('h2', {}, 'What repeats', el('span', { class: 'sub' }, 'the spectrum')),
+        'div',
+        { class: 'moreinner' },
+        el('h3', {}, 'What repeats', el('span', { class: 'sub' }, 'the spectrum')),
         el('div', { class: 'intro' }, 'Bright dots away from the centre are stripes or grids in the photo; the further out, the finer. Rings mark the ones found.'),
         this.spectrum.el,
         this.readout,
-        el('div', { class: 'tools', style: 'margin-top:6px' }, addBtn),
+        el('div', { class: 'tools', style: 'margin:6px 0 14px' }, addBtn),
+        el('h3', {}, 'Analysis settings'),
+        this.analysisEl,
+        this.recipeInput,
+        this.batchInput,
       ),
-      el('section', {}, el('h2', {}, 'Photo'), this.sourceEl),
-      el('section', {}, el('h2', {}, 'Settings'), this.analysisEl, this.recipeInput, this.batchInput),
     );
+    const side = el(
+      'div',
+      { class: 'side' },
+      step(1, 'Photo', '', this.sourceEl),
+      step(2, 'How far, and where it is going', '', this.settingsEl),
+      step(3, 'Problems found', 'Ticked problems get fixed. Click one to adjust its fix or hold it back in places.', this.findingsEl),
+      step(4, 'Save and check', '', this.exportEl),
+      el('section', {}, more),
+    );
+    const handle = el('div', { class: 'side-handle', title: 'Drag to resize the panel' });
+    let drag: { x: number; w: number } | null = null;
+    handle.addEventListener('pointerdown', (e) => {
+      drag = { x: e.clientX, w: side.getBoundingClientRect().width };
+      handle.classList.add('dragging');
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      const w = Math.max(360, Math.min(window.innerWidth * 0.7, drag.w + (drag.x - e.clientX)));
+      r.style.setProperty('--side-w', `${Math.round(w)}px`);
+    });
+    handle.addEventListener('pointerup', () => {
+      drag = null;
+      handle.classList.remove('dragging');
+      try {
+        localStorage.setItem('nnormalize.sideWidth', r.style.getPropertyValue('--side-w'));
+      } catch {
+        /* storage may be unavailable */
+      }
+    });
+    try {
+      const saved = localStorage.getItem('nnormalize.sideWidth');
+      if (saved) r.style.setProperty('--side-w', saved);
+    } catch {
+      /* storage may be unavailable */
+    }
 
-    r.append(top, view, side);
+    r.append(top, view, side, handle);
     this.setMode('result');
     this.setZoom('fit');
     this.renderSource();
+    this.renderSettings();
     this.renderAnalysisPanel();
     this.renderFindings();
     this.renderDetail();
     this.renderExport();
+  }
+
+  /** Step 2: the two choices that drive everything else. */
+  private renderSettings(): void {
+    const box = this.settingsEl;
+    box.innerHTML = '';
+    const levelHint = el('div', { class: 'hint' }, LEVEL_WORDS[this.level].hint);
+    this.levelSelect.addEventListener('change', () => {
+      levelHint.textContent = LEVEL_WORDS[this.levelSelect.value as CleanupLevel].hint;
+    });
+    box.appendChild(el('div', { class: 'row wide', title: 'How far the clean-up goes' }, el('span', {}, 'Clean-up'), this.levelSelect));
+    box.appendChild(levelHint);
+    const sel = el('select') as HTMLSelectElement;
+    for (const p of Object.values(PROFILES)) {
+      const o = el('option', { value: p.id }, p.label) as HTMLOptionElement;
+      if (p.id === this.profileId) o.selected = true;
+      sel.appendChild(o);
+    }
+    const profHint = el('div', { class: 'hint' }, PROFILES[this.profileId].hint);
+    sel.addEventListener('change', () => {
+      this.profileId = sel.value as ProfileId;
+      this.checked = false;
+      this.report = null;
+      profHint.textContent = PROFILES[this.profileId].hint;
+      this.renderExport();
+      if (this.profileId === 'reddit' && (this.level === 'standard' || this.level === 'gentle')) this.setStatus('Tip: Strong clean-up is the better match for Reddit; at Standard the grain looks unchanged after their compression.');
+    });
+    box.appendChild(el('div', { class: 'row wide', title: 'Decides how the file is written and what the check simulates' }, el('span', {}, 'Going to'), sel));
+    box.appendChild(profHint);
   }
 
   private renderAnalysisPanel(): void {
@@ -512,6 +566,7 @@ export class App {
     const stageWords: Record<string, string> = { spectrum: 'what repeats', peaks: 'measuring patterns', noise: 'grain', hotpixels: 'dead pixels', colour: 'colour noise', halos: 'edge halos' };
     const a = await this.client.analyze({ ...this.analysisOptions, level: this.level }, (stage, fr) => this.setStatus(`Looking for problems: ${stageWords[stage] ?? stage}`, fr));
     this.analysis = a;
+    requestAnimationFrame(() => this.findingsEl.parentElement?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
     this.spectrum.setAnalysis(a, this.info.meta.dpi ?? null);
     this.renderFindings();
     this.renderSource();
@@ -631,7 +686,10 @@ export class App {
       );
       return row;
     };
-    for (const f of main) box.appendChild(renderRow(f));
+    for (const f of main) {
+      box.appendChild(renderRow(f));
+      if (f.id === this.selected) box.appendChild(this.detailEl);
+    }
     if (rest.length) {
       const d = el('details', { class: 'advanced' }, el('summary', {}, `${rest.length} faint pattern${rest.length > 1 ? 's' : ''} under 1 level — not visible, left alone`));
       for (const f of rest) d.appendChild(renderRow(f));
@@ -643,12 +701,8 @@ export class App {
     const box = this.detailEl;
     box.innerHTML = '';
     const f = this.analysis?.findings.find((x) => x.id === this.selected);
-    if (!f) {
-      box.appendChild(el('div', { class: 'empty' }, 'Click a problem in the list to adjust its fix.'));
-      return;
-    }
+    if (!f) return;
     const st = this.layers.get(f.id);
-    box.appendChild(el('div', { class: 'fixname' }, plainLabel(f)));
     box.appendChild(el('div', { class: 'intro' }, plainFix(f)));
 
     // strength
@@ -746,8 +800,9 @@ export class App {
       box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'How'), sel));
     }
 
-    // where it applies
-    box.appendChild(el('div', { class: 'subhead' }, 'Where it applies'));
+    // where it applies, tucked away until wanted
+    const where = el('details', { class: 'advanced', open: this.viewer.maskMode ? '' : undefined }, el('summary', {}, 'Hold it back in places (brush, brightness range)'));
+    box.appendChild(where);
     const tools = el('div', { class: 'tools' });
     const brushOn = this.viewer.maskMode;
     tools.appendChild(el('button', { class: brushOn ? 'on' : '', onclick: () => this.toggleBrush() }, brushOn ? 'Brush is on' : 'Brush'));
@@ -767,7 +822,7 @@ export class App {
     tools.appendChild(el('button', { onclick: () => void this.maskFill(0) }, 'Nowhere'));
     tools.appendChild(el('button', { onclick: () => void this.maskInvert() }, 'Swap'));
     if (f.kind === 'periodic') tools.appendChild(el('button', { onclick: () => void this.maskFromAnalysis() }, 'Only where it was found'));
-    box.appendChild(tools);
+    where.appendChild(tools);
     const size = el('input', { type: 'range', min: '4', max: '800', value: String(this.viewer.brush.size) }) as HTMLInputElement;
     const sizeVal = el('span', { class: 'val' }, `${this.viewer.brush.size} px`);
     size.addEventListener('input', () => {
@@ -776,8 +831,8 @@ export class App {
     });
     const hard = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(this.viewer.brush.hardness * 100)) }) as HTMLInputElement;
     hard.addEventListener('input', () => (this.viewer.brush.hardness = Number(hard.value) / 100));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush size'), size, sizeVal));
-    box.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush edge'), hard, el('span', { class: 'val' }, 'soft → hard')));
+    where.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush size'), size, sizeVal));
+    where.appendChild(el('div', { class: 'row' }, el('span', {}, 'Brush edge'), hard, el('span', { class: 'val' }, 'soft → hard')));
     const lo = el('input', { type: 'range', min: '0', max: '100', value: '0' }) as HTMLInputElement;
     const hi = el('input', { type: 'range', min: '0', max: '100', value: '100' }) as HTMLInputElement;
     const lumVal = el('span', { class: 'val' }, 'dark → bright');
@@ -787,8 +842,8 @@ export class App {
     };
     lo.addEventListener('change', applyLum);
     hi.addEventListener('change', applyLum);
-    box.appendChild(el('div', { class: 'row', title: 'Apply the fix only to this brightness range' }, el('span', {}, 'By brightness'), el('div', { style: 'display:flex;gap:4px' }, lo, hi), lumVal));
-    box.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'With the brush on, drag over the picture. Amber shows where the fix is held back. Shift + wheel resizes the brush; hold Alt to drag the picture instead.'));
+    where.appendChild(el('div', { class: 'row', title: 'Apply the fix only to this brightness range' }, el('span', {}, 'By brightness'), el('div', { style: 'display:flex;gap:4px' }, lo, hi), lumVal));
+    where.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'With the brush on, drag over the picture. Amber shows where the fix is held back. Shift + wheel resizes the brush; hold Alt to drag the picture instead.'));
 
     // technical details, collapsed
     const det = el('details', { class: 'advanced' }, el('summary', {}, 'Measurements'));
@@ -918,14 +973,25 @@ export class App {
   private renderSource(): void {
     const box = this.sourceEl;
     box.innerHTML = '';
+    const buttons = el(
+      'div',
+      { class: 'tools' },
+      el('button', { class: this.info ? '' : 'primary', onclick: () => this.fileInput.click() }, this.info ? 'Open another photo' : 'Open a photo'),
+      el('button', { class: 'quiet', onclick: () => void this.loadTest(), title: 'A made-up photo with known stripes, a block grid and dead pixels, to see what the tool does' }, 'Try the test image'),
+    );
     if (!this.info) {
-      box.appendChild(el('span', { class: 'empty' }, 'No photo loaded.'));
+      box.appendChild(el('div', { class: 'welcome' }, el('p', {}, 'Open a photo, or drop one on the dark area. Nothing leaves your computer.'), el('p', {}, 'Then: choose how far to go and where the photo is going (2), look over what it found and untick anything you want kept (3), and save; the tool checks that every fix survives the place you post it (4).')));
+      box.appendChild(buttons);
       return;
     }
+    box.appendChild(buttons);
     const m = this.info.meta;
+    const grid = el('div', { class: 'source' });
+    const det = el('details', { class: 'advanced' }, el('summary', {}, `${m.fileName}, ${this.info.w} × ${this.info.h} px${m.jpeg?.quality ? `, saved at about quality ${fmt(m.jpeg.quality, 0)}` : ''}`), grid);
+    box.appendChild(det);
     const fact = (k: string, v: string): void => {
-      box.appendChild(el('span', {}, k));
-      box.appendChild(el('b', {}, v));
+      grid.appendChild(el('span', {}, k));
+      grid.appendChild(el('b', {}, v));
     };
     fact('file', m.fileName);
     fact('size', `${this.info.w} × ${this.info.h} px`);
@@ -945,23 +1011,6 @@ export class App {
     const box = this.exportEl;
     box.innerHTML = '';
     const prof = resolveProfile(this.profileId, this.exportOptions);
-    const sel = el('select') as HTMLSelectElement;
-    for (const p of Object.values(PROFILES)) {
-      const o = el('option', { value: p.id }, p.label) as HTMLOptionElement;
-      if (p.id === this.profileId) o.selected = true;
-      sel.appendChild(o);
-    }
-    sel.addEventListener('change', () => {
-      this.profileId = sel.value as ProfileId;
-      this.checked = false;
-      this.report = null;
-      this.renderExport();
-      const sl = PROFILES[this.profileId].suggestedLevel;
-      if (sl && this.level === 'standard' && this.profileId === 'reddit') this.setStatus('Tip: Strong clean-up is the better match for Reddit; at Standard the grain looks unchanged after their compression.');
-    });
-    box.appendChild(el('div', { class: 'row wide' }, el('span', {}, 'Going to'), sel));
-    box.appendChild(el('div', { class: 'intro' }, prof.hint));
-
     if (this.profileId === 'custom') {
       const o = this.exportOptions;
       const q = el('input', { type: 'range', min: '50', max: '100', value: String(o.quality) }) as HTMLInputElement;
@@ -1018,12 +1067,19 @@ export class App {
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(true), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
     actions.appendChild(el('button', { onclick: () => void this.doExport(false), disabled: this.analysis ? undefined : '', title: 'Run the check and show the As posted view without downloading' }, 'Check only'));
-    actions.appendChild(el('button', { onclick: () => this.downloadRecipe(), disabled: this.analysis ? undefined : '', title: 'Everything you set here, as a file you can load for another photo' }, 'Save settings file'));
+    actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadRecipe(), disabled: this.analysis ? undefined : '', title: 'Everything you set here, as a file you can load for another photo' }, 'Save settings file'));
     box.appendChild(actions);
 
-    if (this.report) box.appendChild(this.renderReport(this.report));
+    if (this.report) {
+      const rep = this.renderReport(this.report);
+      box.appendChild(rep);
+      if (this.scrollToReport) {
+        this.scrollToReport = false;
+        requestAnimationFrame(() => rep.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+      }
+    }
     if (this.analysis) {
-      const nc = el('div', { class: 'notchecked' }, 'Things this tool does not look for:');
+      const nc = el('details', { class: 'advanced notchecked' }, el('summary', {}, 'Things this tool does not look for'));
       const ul = el('ul');
       for (const t of this.analysis.notChecked) ul.appendChild(el('li', {}, t));
       nc.appendChild(ul);
@@ -1082,7 +1138,8 @@ export class App {
     fact('grain, downloader’s copy', `${fmt(r.survival.grainLevels.resultOnDest, 2)} lv (untouched photo: ${fmt(r.survival.grainLevels.sourceOnDest, 2)})`);
     fact('patterns visible', r.residualPeriodic ? r.residual.map((f) => (f.kind === 'periodic' ? `every ${fmt(f.details.period, 1)} px, ${fmt(Math.max(f.details.amplitude, f.details.amplitudeP90) * 255, 1)} lv` : '')).join('; ') : 'none');
     fact('saving changed pixels by', `${fmt(r.encodeRmsLevels, 2)} lv on average`);
-    box.appendChild(facts);
+    const det = el('details', { class: 'advanced' }, el('summary', {}, 'Details of the file and the check'));
+    det.appendChild(facts);
     const actions = el('div', { class: 'actions' });
     if (this.jpegUrl) {
       const name = (this.info?.meta.fileName ?? 'image').replace(/\.[^.]+$/, '') + '-normalized.jpg';
@@ -1092,6 +1149,7 @@ export class App {
     for (const sf of r.suggested) actions.appendChild(el('button', { onclick: () => void this.adoptSuggested(sf) }, `Add fix: ${plainLabel(sf).toLowerCase()}`));
     actions.appendChild(el('button', { class: 'quiet', onclick: () => this.downloadReport() }, 'Full report (JSON)'));
     box.appendChild(actions);
+    box.appendChild(det);
     return box;
   }
 
@@ -1121,6 +1179,7 @@ export class App {
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
       this.report = report;
       this.checked = true;
+      this.scrollToReport = true;
       const fixes = report.survival.fixes;
       const kept = fixes.filter((f) => f.verdict === 'survives').length;
       const lost = fixes.filter((f) => f.verdict === 'lost').length;
