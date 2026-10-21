@@ -13,15 +13,16 @@
  * boundaries stay settled through its re-save.
  */
 
-import { STD_LUMA } from './blocks';
+import { STD_CHROMA, STD_LUMA } from './blocks';
 import { makePlane, type Plane } from './plane';
 
-/** libjpeg's quality scaling of the Annex K luma table, baseline-clamped. */
-export function lumaQuantTable(quality: number): Float64Array {
+/** libjpeg's quality scaling of the Annex K luma (or chroma) table, baseline-clamped. */
+export function lumaQuantTable(quality: number, chroma = false): Float64Array {
   const q = Math.max(1, Math.min(100, Math.round(quality)));
   const s = q < 50 ? 5000 / q : 200 - 2 * q;
   const out = new Float64Array(64);
-  for (let i = 0; i < 64; i++) out[i] = Math.max(1, Math.min(255, Math.floor((STD_LUMA[i] * s + 50) / 100)));
+  const base = chroma ? STD_CHROMA : STD_LUMA;
+  for (let i = 0; i < 64; i++) out[i] = Math.max(1, Math.min(255, Math.floor((base[i] * s + 50) / 100)));
   return out;
 }
 
@@ -281,4 +282,31 @@ export function jpegYccToRgb(Y: Plane, Cb: Plane, Cr: Plane): [Plane, Plane, Pla
     b.data[i] = Math.max(0, Math.min(1, y + 1.772 * cb));
   }
   return [r, g, b];
+}
+
+/** The plane after a JPEG-style 8×8 quantisation at `quality` with the standard luma or chroma table (what an encoder keeps). */
+export function requantize(p: Plane, quality: number, chroma = false): Plane {
+  const Q = lumaQuantTable(quality, chroma);
+  const { w, h } = p;
+  const out = makePlane(w, h);
+  out.data.set(p.data);
+  const blk = new Float64Array(64);
+  const c = new Float64Array(64);
+  const tmp = new Float64Array(64);
+  for (let by = 0; by + 8 <= h; by += 8) {
+    for (let bx = 0; bx + 8 <= w; bx += 8) {
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) blk[y * 8 + x] = p.data[(by + y) * w + bx + x] * 255 - 128;
+      fdct8(blk, c, tmp);
+      for (let i = 0; i < 64; i++) c[i] = Math.round(c[i] / Q[i]) * Q[i];
+      idct8(c, blk, tmp);
+      for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) out.data[(by + y) * w + bx + x] = Math.min(1, Math.max(0, (blk[y * 8 + x] + 128) / 255));
+    }
+  }
+  return out;
+}
+
+/** RGB planes after a JPEG-style 4:4:4 rounding at `quality`: YCbCr, each plane quantised with its own table, back to RGB. */
+export function requantizeRgb(p: [Plane, Plane, Plane], quality: number): [Plane, Plane, Plane] {
+  const [Y, Cb, Cr] = rgbToJpegYcc(p[0], p[1], p[2]);
+  return jpegYccToRgb(requantize(Y, quality), requantize(Cb, quality, true), requantize(Cr, quality, true));
 }

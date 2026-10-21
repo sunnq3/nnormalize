@@ -7,6 +7,7 @@
 import { analyze } from '../analysis/analyze';
 import { jpegYccToRgb, rgbToJpegYcc, settleBlocks } from '../dsp/jpegdomain';
 import { noiseMap } from '../dsp/noise';
+import { calibrateSensorNoise, cfaSignature, rebakeThroughSensor, type BakeStyle } from '../dsp/cfa';
 import { measureSurvival } from '../analysis/survival';
 import { computeDelta } from '../analysis/apply';
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
@@ -18,12 +19,12 @@ import { resolveProfile, type ProfileId } from './profiles';
 import { decodeImage, type SourceImage, type SourceMeta } from '../io/decode';
 import { parseJpeg } from '../io/jpegParse';
 import { psnr, rng, synthesize } from '../synth/generate';
-import type { Budget, LayerSetting, LayerStats, LiveReport, LoadedInfo, RenderRequest, RenderResult, RoundTripReport, SynthRequest } from './protocol';
+import type { BakeSetting, Budget, LayerSetting, LayerStats, LiveReport, SensorReport, LoadedInfo, RenderRequest, RenderResult, RoundTripReport, SynthRequest } from './protocol';
 
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
 /** Order in which correction stages are applied; later stages are computed on earlier ones. */
-export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, detail: 4, edges: 4, noise: 5, chroma: 6, banding: 7, grain: 8 };
+export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, detail: 4, edges: 4, noise: 5, fringes: 5.5, chroma: 6, banding: 7, grain: 8 };
 
 /** Findings in the order their layers should be built. */
 export function stageSorted<T extends { kind: Finding['kind'] }>(findings: T[]): T[] {
@@ -503,6 +504,23 @@ export class Engine {
   }
 
   private grainScale = 1;
+
+  /** Put the finished picture through a sensor on the original grid (see dsp/cfa). */
+  private sensorNoiseLevels = 0;
+  private sensorMethod = 'mhc';
+  private bakeThroughSensor(p: [Plane, Plane, Plane], quality: number, source: [Plane, Plane, Plane], style: BakeStyle): [Plane, Plane, Plane] {
+    const cfa = this.analysis!.cfa;
+    // as clear a grid, once written at this quality, as the original photo would show
+    const n = calibrateSensorNoise(p, cfa, source, quality, 0x5e115, style);
+    this.sensorNoiseLevels = n.levels;
+    this.sensorMethod = n.method ?? 'mhc';
+    return rebakeThroughSensor(p, cfa, n);
+  }
+
+  private cfaLayout(): string {
+    const c = this.analysis!.cfa;
+    return c.redY === 0 ? (c.redX === 0 ? 'RGGB' : 'GRBG') : c.redX === 0 ? 'GBRG' : 'BGGR';
+  }
   private liveCache: { key: string; srcDest: [Plane, Plane, Plane]; source: [Plane, Plane, Plane]; values: Map<string, number> } | null = null;
 
   /**
@@ -512,7 +530,7 @@ export class Engine {
    * photo's side is kept between runs. Also tunes how much the grain put
    * back has to be raised so the copy carries the amount set.
    */
-  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions): Promise<LiveReport> {
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions, bake: BakeSetting = 'sharp'): Promise<LiveReport> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const t0 = performance.now();
     const profile = resolveProfile(profileId, customOptions);
@@ -545,11 +563,14 @@ export class Engine {
     // any change is re-rounded by the destination, so block boundaries are settled whenever something is fixed
     const blockFixOn = layers.some((l) => l.strength > 0);
     let survival!: ReturnType<typeof measureSurvival>;
+    let sensor!: SensorReport;
     let bytes = 0;
     // a second round only when the grain put back came out well off the amount set
     for (let round = 0; round < 2; round++) {
       const useLayers = this.grainScale === 1 ? layers : layers.map((l) => (l.id === grainWant?.id ? { ...l, strength: l.strength * this.grainScale } : l));
-      const composed = crop(useLayers, master);
+      let composed = crop(useLayers, master);
+      // the crop starts on a multiple of 32, so the sensor grid keeps its place
+      if (bake !== 'off') composed = this.bakeThroughSensor(composed, opts.quality, cache.source, bake);
       if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
         const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
         const r = settleBlocks(Y, opts.quality, { grainLevels: noiseMap(Y, 32).refSigma * 255, iterations: 2 });
@@ -562,6 +583,16 @@ export class Engine {
       bytes = written.bytes;
       const resDest = (await simulateReencode(written.planes, profile.check.options)).planes;
       survival = measureSurvival(cache.source, cache.srcDest, resDest, findings, { crop: full ? undefined : { x0, y0, fullW: src.w }, cache: cache.values });
+      sensor = {
+        baked: bake !== 'off',
+        noiseLevels: this.sensorNoiseLevels,
+        method: this.sensorMethod,
+        layout: this.cfaLayout(),
+        detected: this.analysis.cfa.detected,
+        original: memoNum(cache.values, 'cfa:s', () => cfaSignature(cache.source)),
+        inFile: cfaSignature(written.planes),
+        posted: cfaSignature(resDest),
+      };
       // learn the grain scale (kept for the next check and for the save)
       const g = survival.fixes.find((f) => f.kind === 'grain');
       if (!g || want <= 0 || g.resultOnDest <= 0.05) break;
@@ -577,6 +608,7 @@ export class Engine {
       region: { x0, y0, w: cw, h: ch, full },
       bytesEstimate: Math.round(bytes * ((src.w * src.h) / (cw * ch))),
       grainScale: this.grainScale,
+      sensor,
       ms: Math.round(performance.now() - t0),
     };
   }
@@ -591,6 +623,7 @@ export class Engine {
     budget: Budget,
     analysisOptions: Partial<AnalysisOptions>,
     progress: (stage: string, fraction: number) => void,
+    bake: BakeSetting = 'sharp',
   ): Promise<{ jpeg: Uint8Array; report: RoundTripReport }> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const profile = resolveProfile(profileId, customOptions);
@@ -616,6 +649,10 @@ export class Engine {
       const useLayers = grainScale === 1 ? layers : layers.map((l) => (l.id === grainWant?.id ? { ...l, strength: l.strength * grainScale } : l));
       progress('compose', 0);
       composed = this.compose(useLayers, master);
+      if (bake !== 'off') {
+        progress('bake', 0);
+        composed = this.bakeThroughSensor(composed, opts.quality, this.source.planes, bake);
+      }
       // Block settling at the destination's quality: when the file is written
       // with the destination's own tables and the block fix is on, the luma is
       // put on that quality's coefficient grid with block boundaries settled,
@@ -715,6 +752,7 @@ export class Engine {
       stable: enc.stable,
       settled,
       grainScale,
+      sensor: { baked: bake !== 'off', noiseLevels: this.sensorNoiseLevels, method: this.sensorMethod, layout: this.cfaLayout(), detected: this.analysis.cfa.detected, original: cfaSignature(this.source.planes), inFile: cfaSignature(ours), posted: cfaSignature(resDest) },
       checkLabel: profile.check.label,
       survival,
       residual,
@@ -776,4 +814,12 @@ export function areaDownsample(src: Float32Array, w: number, _h: number, factor:
     }
   }
   return out;
+}
+
+function memoNum(m: Map<string, number>, k: string, fn: () => number): number {
+  const v = m.get(k);
+  if (v !== undefined) return v;
+  const r = fn();
+  m.set(k, r);
+  return r;
 }

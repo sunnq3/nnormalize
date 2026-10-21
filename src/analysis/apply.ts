@@ -9,7 +9,8 @@ import { deblockDelta } from '../dsp/blocks';
 import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr } from '../dsp/chroma';
 import { grainDelta } from '../dsp/grain';
 import { debandDelta } from '../dsp/banding';
-import { correctionGainDb, outlineClampDelta } from '../dsp/edges';
+import { correctionGainDb, edgeZone, outlineClampDelta } from '../dsp/edges';
+import { falseColourDelta } from '../dsp/cfa';
 import { bandGains, detailBalance, detailDelta, radialProfile, wantedGainDb } from '../dsp/spectrum';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
 import { median9 } from '../dsp/hotpixels';
@@ -93,15 +94,31 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
     progress(1);
     return [delta, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }];
   }
+  if (finding.kind === 'fringes') {
+    const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);
+    const { dCb, dCr } = falseColourDelta(Y, Cb, Cr, finding.details.amount);
+    progress(0.7);
+    const Cb2 = { w: Cb.w, h: Cb.h, data: Cb.data.map((v, i) => v + dCb.data[i]) };
+    const Cr2 = { w: Cr.w, h: Cr.h, data: Cr.data.map((v, i) => v + dCr.data[i]) };
+    const rgb = toRGB(Y, Cb2, Cr2);
+    progress(1);
+    return rgb.map((p, c) => ({ w: p.w, h: p.h, data: p.data.map((v, i) => v - planes[c].data[i]) })) as [Plane, Plane, Plane];
+  }
   if (finding.kind === 'edges') {
     // brightness only: the same delta goes to all three channels
     const d = finding.details;
     const Y = lumaOf(planes);
     const f = Float32Array.from({ length: 128 }, (_, i) => (i + 1) / 256);
     const model = { blurSigma: d.blurSigma, amounts: d.amounts, rms: d.fitRms };
-    const gains = bandGains(f, correctionGainDb(model, d.targetWidthPx, f, d.grainSigma), d.amount);
-    progress(0.4);
-    const delta = detailDelta(Y, gains);
+    // at strong straight edges: the outlines go (keeping only the crispness asked for);
+    // in texture: only the wide sharpening goes and the blur is reduced, the fine crispness stays
+    const atEdges = detailDelta(Y, bandGains(f, correctionGainDb(model, d.targetWidthPx, f, d.grainSigma, d.keepCrisp ?? 0.5), d.amount));
+    progress(0.3);
+    const inTexture = detailDelta(Y, bandGains(f, correctionGainDb(model, d.targetWidthPx, f, d.grainSigma, 1), d.amount));
+    const zone = edgeZone(Y);
+    const delta = makePlane(Y.w, Y.h);
+    for (let i = 0; i < delta.data.length; i++) delta.data[i] = inTexture.data[i] + zone[i] * (atEdges.data[i] - inTexture.data[i]);
+    progress(0.5);
     // then the lopsided outlines the linear step cannot reach, beside flat areas only
     const lin = { w: Y.w, h: Y.h, data: Y.data.map((v, i) => v + delta.data[i]) };
     const clamp = outlineClampDelta(lin, d.amount);

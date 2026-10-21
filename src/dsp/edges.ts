@@ -382,20 +382,33 @@ export function reachableSigma(m: CameraModel, wantedSigma: number): number {
 
 /**
  * The correction, as a gain in dB at each frequency: the target response
- * divided by the camera's, regularised (Wiener) so frequencies the camera
- * barely passed, which hold mostly noise, are not blown up, softly limited
+ * divided by the camera's; boosts are held back (toward no change, not
+ * toward zero) where the camera passed little and noise dominates; softly limited
  * to ×4 up and ×0.25 down, with boosts fading out past 0.42 cycles/px.
  */
-export function correctionGainDb(m: CameraModel, targetWidthPx: number, f: Float32Array, grainSigma: number): Float32Array {
+export function correctionGainDb(m: CameraModel, targetWidthPx: number, f: Float32Array, grainSigma: number, keepCrisp = 0): Float32Array {
   const st = reachableSigma(m, targetSigma(targetWidthPx));
+  // part of the camera's sharpening can be kept in the target (1 = all of it:
+  // then only the blur is reduced). At edges it makes outlines; in texture it
+  // is what reads as detail.
+  const crisp = (fr: number): number => {
+    let v = 1;
+    for (let k = 0; k < 3; k++) v += keepCrisp * m.amounts[k] * (1 - Math.exp(-2 * Math.PI * Math.PI * USM_SIGMAS[k] ** 2 * fr * fr));
+    return v;
+  };
   const out = new Float32Array(f.length);
   // noise-to-signal: natural scenes ~1/f², grain flat
   const nsr0 = Math.max(0.002, ((grainSigma * 255) / 100) ** 2);
   for (let i = 0; i < f.length; i++) {
     const H = cameraResponse(m, f[i]);
-    const T = Math.exp(-2 * Math.PI * Math.PI * st * st * f[i] * f[i]);
+    const T = Math.exp(-2 * Math.PI * Math.PI * st * st * f[i] * f[i]) * crisp(f[i]);
     const eps = nsr0 * (f[i] / 0.25) ** 2;
-    const C = (T * H) / (H * H + eps);
+    // Lowering a frequency (undoing sharpening) needs no care. Raising one
+    // (deblurring) is held back where the camera passed little, since what is
+    // there is mostly noise; held back toward leaving it as it is, never toward
+    // erasing it.
+    const ratio = T / Math.max(1e-9, H);
+    const C = ratio <= 1 ? ratio : 1 + (ratio - 1) * ((H * H) / (H * H + eps));
     // soft limits keep the curve smooth, so the filter does not ring
     let db = 20 * Math.log10(Math.max(1e-6, C));
     const up = 20 * Math.log10(MAX_BOOST);
@@ -516,4 +529,44 @@ export function outlineClampDelta(Y: Plane, amount: number): Plane {
   const out = { w, h, data: new Float32Array(w * h) };
   for (let i = 0; i < w * h; i++) out.data[i] = (up[i] - down[i]) * amount;
   return out;
+}
+
+/**
+ * Where strong straight edges are, feathered: 1 on and within ~4 px of
+ * them, fading to 0 by ~10 px. The full correction (outlines removed) goes
+ * there; texture elsewhere keeps the camera's finest crispness.
+ */
+export function edgeZone(Y: Plane): Float32Array {
+  const { w, h } = Y;
+  const d = Y.data;
+  const gx = new Float32Array(w * h);
+  const gy = new Float32Array(w * h);
+  for (let y = 1; y < h - 1; y++)
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      gx[i] = 0.5 * (d[i + 1] - d[i - 1]);
+      gy[i] = 0.5 * (d[i + w] - d[i - w]);
+    }
+  const xx = new Float32Array(w * h);
+  const yy = new Float32Array(w * h);
+  const xy = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    xx[i] = gx[i] * gx[i];
+    yy[i] = gy[i] * gy[i];
+    xy[i] = gx[i] * gy[i];
+  }
+  const bxx = boxBlur(xx, w, h, 3);
+  const byy = boxBlur(yy, w, h, 3);
+  const bxy = boxBlur(xy, w, h, 3);
+  const edge = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    if (Math.hypot(gx[i], gy[i]) <= 8 / 255) continue;
+    const tr = bxx[i] + byy[i];
+    if (tr <= 0) continue;
+    if (((bxx[i] - byy[i]) ** 2 + 4 * bxy[i] * bxy[i]) / (tr * tr) >= 0.75) edge[i] = 1;
+  }
+  const near = morph(edge, w, h, 4, true);
+  const soft = boxBlur(boxBlur(near, w, h, 3), w, h, 3);
+  for (let i = 0; i < soft.length; i++) soft[i] = Math.min(1, soft[i] * 1.5);
+  return soft;
 }

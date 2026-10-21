@@ -62,6 +62,7 @@ export interface RoundTripReport {
   stable: boolean;
   /** block settling on the destination's coefficient grid, when it was done */
   settled: { quality: number; changedBlocks: number; blocks: number; meanChangeLevels: number } | null;
+  sensor: SensorReport;
   /** grain put back was scaled by this so the downloader's copy carries the amount set (1 = no scaling needed) */
   grainScale: number;
   /** what the check simulated */
@@ -80,6 +81,23 @@ export interface RoundTripReport {
   budget: Budget;
 }
 
+/** The sensor bake at the end: off, sharp (Malvar–He–Cutler, subtle noise), or matching the original's grid. */
+export type BakeSetting = 'off' | 'sharp' | 'match';
+
+/** The sensor bake: whether it ran, the grid used, and how clearly the 2×2 sensor pattern shows (0…1). */
+export interface SensorReport {
+  baked: boolean;
+  /** sensor noise added at the photosites, as its strength at mid grey in levels */
+  noiseLevels: number;
+  /** 'mhc' (Malvar–He–Cutler) or 'bilinear' */
+  method: string;
+  layout: string;
+  detected: boolean;
+  original: number;
+  inFile: number;
+  posted: number;
+}
+
 /** The live check: survival on a crop, written once at the destination's settings. */
 export interface LiveReport {
   survival: SurvivalReport;
@@ -88,6 +106,7 @@ export interface LiveReport {
   /** file size of the whole photo, estimated from the crop */
   bytesEstimate: number;
   grainScale: number;
+  sensor: SensorReport;
   ms: number;
 }
 
@@ -128,9 +147,10 @@ export type Request =
       options: JpegExportOptions;
       budget: Budget;
       analysisOptions: Partial<AnalysisOptions>;
+      bake: BakeSetting;
     }
   | { type: 'verifyResult'; id: number; layers: LayerSetting[]; master: number; analysisOptions: Partial<AnalysisOptions> }
-  | { type: 'liveCheck'; id: number; layers: LayerSetting[]; findings: Finding[]; master: number; profile: ProfileId; options: JpegExportOptions }
+  | { type: 'liveCheck'; id: number; layers: LayerSetting[]; findings: Finding[]; master: number; profile: ProfileId; options: JpegExportOptions; bake: BakeSetting }
   | { type: 'presenceMask'; id: number; findingId: string }
   | { type: 'addPeak'; id: number; u: number; v: number }
   | { type: 'luminosityMask'; id: number; findingId: string; lo: number; hi: number; soft: number };

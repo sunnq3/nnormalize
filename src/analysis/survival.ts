@@ -18,6 +18,7 @@ import { median9 } from '../dsp/hotpixels';
 import { bandingStrength } from '../dsp/banding';
 import { detailBalance, radialProfile } from '../dsp/spectrum';
 import { measureEdgeProfile } from '../dsp/edges';
+import { measureFalseColour } from '../dsp/cfa';
 import { noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
 import { lumaPlane, type Plane } from '../dsp/plane';
@@ -271,6 +272,30 @@ export function measureSurvival(
               : d.mode === 'sharp'
                 ? 'the re-save leaves some of the oversharpening.'
                 : 'the re-save smooths away part of the detail brought back; raise the most it may add if the copy looks soft.',
+        });
+        break;
+      }
+      case 'fringes': {
+        const fc = (p: [Plane, Plane, Plane]): number => {
+          const [Y, Cb, Cr] = toYCbCr(p[0], p[1], p[2]);
+          return measureFalseColour(Y, Cb, Cr).detailLevels;
+        };
+        const v0 = memo(`${f.id}:s`, () => fc(source));
+        const v1 = memo(`${f.id}:sd`, () => fc(srcDest));
+        const v2 = fc(resDest);
+        const retained = v1 > 0.3 ? Math.max(0, Math.min(1, 1 - v2 / v1)) : 1;
+        const v: Verdict = v2 <= Math.max(1.2, f.details.flatLevels) || retained >= 0.6 ? 'survives' : retained >= 0.3 ? 'partly' : 'lost';
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: v0,
+          sourceOnDest: v1,
+          resultOnDest: v2,
+          retained,
+          verdict: v,
+          note: v === 'survives' ? 'fine detail stays free of false colour.' : 'some false colour shows again after the re-save.',
         });
         break;
       }

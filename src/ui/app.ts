@@ -6,7 +6,7 @@
 import type { Analysis, AnalysisOptions, CleanupLevel, Finding, PeriodicMethod } from '../analysis/types';
 import type { FixSurvival } from '../analysis/survival';
 import { EngineClient } from '../engine/client';
-import { defaultBudget, type Budget, type LayerSetting, type LiveReport, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
+import { defaultBudget, type Budget, type BakeSetting, type LayerSetting, type LiveReport, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
 import type { JpegExportOptions } from '../io/encode';
 import { PROFILES, resolveProfile, type ProfileId } from '../engine/profiles';
 import { stageSorted } from '../engine/engine';
@@ -79,6 +79,7 @@ export class App {
   private exportEl!: HTMLElement;
   private settingsEl!: HTMLElement;
   private scrollToReport = false;
+  private bake: BakeSetting = 'sharp';
   private liveEl!: HTMLElement;
   private liveTimer: ReturnType<typeof setTimeout> | null = null;
   private liveRunning = false;
@@ -252,11 +253,6 @@ export class App {
     this.exportEl = el('div', { class: 'export' });
     this.settingsEl = el('div', { class: 'settings' });
     this.liveEl = el('div', { class: 'livecheck' });
-    try {
-      this.liveCollapsed = localStorage.getItem('nnormalize.liveCollapsed') === '1';
-    } catch {
-      /* storage may be unavailable */
-    }
     this.exportEl.addEventListener('change', () => this.scheduleLive());
     const step = (n: number, title: string, hint: string, ...body: (HTMLElement | string)[]): HTMLElement =>
       el('section', { class: 'step' }, el('h2', {}, el('span', { class: 'num' }, String(n)), title), hint ? el('div', { class: 'intro' }, hint) : '', ...body);
@@ -284,7 +280,6 @@ export class App {
       step(3, 'Problems found', 'Ticked problems get fixed. Click one to adjust its fix or hold it back in places.', this.findingsEl),
       step(4, 'Save', '', this.exportEl),
       el('section', {}, more),
-      this.liveEl,
     );
     const handle = el('div', { class: 'side-handle', title: 'Drag to resize the panel' });
     let drag: { x: number; w: number } | null = null;
@@ -314,7 +309,7 @@ export class App {
       /* storage may be unavailable */
     }
 
-    r.append(top, view, side, handle);
+    r.append(top, view, this.liveEl, side, handle);
     this.setMode('result');
     this.setZoom('fit');
     this.renderSource();
@@ -347,7 +342,7 @@ export class App {
     this.liveError = '';
     this.renderLive();
     try {
-      this.liveReport = await this.client.liveCheck(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions);
+      this.liveReport = await this.client.liveCheck(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.bake);
     } catch (e) {
       this.liveError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -378,19 +373,14 @@ export class App {
         class: 'livehead',
         onclick: () => {
           this.liveCollapsed = !this.liveCollapsed;
-          try {
-            localStorage.setItem('nnormalize.liveCollapsed', this.liveCollapsed ? '1' : '0');
-          } catch {
-            /* storage may be unavailable */
-          }
           this.renderLive();
         },
-        title: 'Click to show or hide the table',
+        title: 'Click to hide or show the table',
       },
       el('span', { class: `dot ${!r ? '' : lost ? 'lost' : partly ? 'partly' : 'survives'}` }),
       el('b', {}, verdict),
       el('span', { class: `state${this.liveRunning || this.liveDirty ? ' busy' : ''}` }, state),
-      el('span', { class: 'chev' }, this.liveCollapsed ? '▴' : '▾'),
+      el('span', { class: 'chev' }, this.liveCollapsed ? 'show ▴' : 'hide ▾'),
     );
     box.appendChild(head);
     if (this.liveCollapsed) return;
@@ -407,6 +397,17 @@ export class App {
       }
       box.appendChild(ul);
     }
+    const sn = r.sensor;
+    const pct = (v: number): string => `${Math.round(v * 100)} %`;
+    box.appendChild(
+      el(
+        'div',
+        { class: 'livesub' },
+        sn.baked
+          ? `Sensor bake (${sn.layout}, ${sn.method === 'bilinear' ? 'bilinear' : 'Malvar–He–Cutler'} fill-in, photon noise ${fmt(sn.noiseLevels, 1)} levels at mid grey): grid pattern ${pct(sn.inFile)} in the file written for this destination, ${pct(sn.posted)} after its re-save (the original photo: ${pct(sn.original)}).${sn.posted < 0.02 && sn.original >= 0.02 ? ' This re-save erases any camera’s grid, the original’s too; it stays in a Master copy.' : ''}`
+          : `Sensor bake is off. Grid pattern in your file ${pct(sn.inFile)}, after the re-save ${pct(sn.posted)} (the original photo: ${pct(sn.original)}).`,
+      ),
+    );
     const where = r.region.full ? 'Checked on the whole photo' : `Checked on the centre ${r.region.w} × ${r.region.h} px of the photo`;
     box.appendChild(el('div', { class: 'livesub' }, `${where}, in ${(r.ms / 1000).toFixed(1)} s. File about ${Math.round(r.bytesEstimate / 1024)} kB. Saving checks the whole photo.`));
   }
@@ -876,8 +877,16 @@ export class App {
         void this.rebuildFrom(f);
       });
       box.appendChild(el('div', { class: 'row', title: 'How wide a sharp edge should be. A good camera gives about 1.5–2 px. The fix stops short of this when going further would make new outlines' }, el('span', {}, 'Edge to aim for'), tw, tv));
+      const kc = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round((f.details.keepCrisp ?? 0.5) * 100)) }) as HTMLInputElement;
+      const kv = el('span', { class: 'val' }, `${Math.round((f.details.keepCrisp ?? 0.5) * 100)} %`);
+      kc.addEventListener('input', () => (kv.textContent = `${kc.value} %`));
+      kc.addEventListener('change', () => {
+        f.details.keepCrisp = Number(kc.value) / 100;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: 'How much of the camera’s sharpening to keep at strong edges, where it shows as an outline. Texture always keeps it, since there it reads as detail. 0 removes it all at edges (cleanest outlines)' }, el('span', {}, 'Keep at edges'), kc, kv));
     }
-    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges') {
+    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges' || f.kind === 'fringes') {
       const am = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.amount * 100)) }) as HTMLInputElement;
       const av = el('span', { class: 'val' }, `${Math.round(f.details.amount * 100)} %`);
       am.addEventListener('input', () => (av.textContent = `${am.value} %`));
@@ -1044,6 +1053,10 @@ export class App {
         return `${fmt(d.measured[i] - d.reference[i], 1)} dB`;
       };
       fact('fine detail vs reference', `${at(0.12)} · ${at(0.2)} · ${at(0.3)} (at 8, 5, 3 px)`);
+    } else if (f.kind === 'fringes') {
+      fact('on fine detail', `${fmt(f.details.detailLevels, 2)} levels`);
+      fact('in smooth areas', `${fmt(f.details.flatLevels, 2)} levels`);
+      fact('fine detail covers', `${fmt(f.details.detailFraction * 100, 0)} % of the photo`);
     } else if (f.kind === 'edges') {
       const d = f.details;
       fact('edges used', `${d.count} (the sharpest fifth)`);
@@ -1237,6 +1250,32 @@ export class App {
     check.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'Each fix is also judged on its own: how much of it is left in the copy, compared with the untouched photo given the same re-save.'));
     box.appendChild(check);
 
+    const layout = this.analysis ? (this.analysis.cfa.detected ? `the photo's own sensor grid (green found; ${['RGGB', 'GRBG', 'GBRG', 'BGGR'][this.analysis.cfa.redY * 2 + this.analysis.cfa.redX]} layout)` : 'a standard RGGB sensor grid (the photo shows no grid of its own)') : 'the photo’s sensor grid';
+    const bakeSel = el('select') as HTMLSelectElement;
+    for (const [v, label] of [
+      ['sharp', 'Sharp: Malvar–He–Cutler, subtle sensor noise'],
+      ['match', 'Match the original’s grid: may be softer and grainier'],
+      ['off', 'Off'],
+    ] as [BakeSetting, string][]) {
+      const o = el('option', { value: v }, label) as HTMLOptionElement;
+      if (v === this.bake) o.selected = true;
+      bakeSel.appendChild(o);
+    }
+    bakeSel.addEventListener('change', () => {
+      this.bake = bakeSel.value as BakeSetting;
+      this.checked = false;
+      this.scheduleLive();
+    });
+    box.appendChild(
+      el(
+        'div',
+        { class: 'row wide', title: 'At the very end the finished picture is re-sampled to one colour per pixel, the way a camera sensor sees light, in linear light with photon noise at each photosite, and the missing colours are filled in again. Everything, edits and grain included, then carries one consistent sensor signature. The After view does not show this step; As posted and the saved file do.' },
+        el('span', {}, 'Sensor bake'),
+        bakeSel,
+      ),
+    );
+    box.appendChild(el('div', { class: 'intro' }, `Bakes the finished picture through a camera sensor on ${layout}.`));
+
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(true), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
     actions.appendChild(el('button', { onclick: () => void this.doExport(false), disabled: this.analysis ? undefined : '', title: 'Check the whole photo (the live check below looks at the centre) and show the As posted view, without downloading' }, 'Full check'));
@@ -1287,6 +1326,7 @@ export class App {
     fact('file', `${(r.bytes / 1024).toFixed(0)} kB, quality ${r.quality}, ${r.chroma === '4:4:4' ? 'full colour detail' : 'reduced colour detail'}`);
     if (r.passes > 1) fact('settled', r.stable ? `yes, in ${r.passes} passes: a re-save there reproduces it` : `not fully after ${r.passes} passes`);
     if (r.grainScale && r.grainScale !== 1) fact('grain put back', `added at ${fmt(r.grainScale, 1)}× the amount set, because the re-save rounds part of it away; the copy carries about the amount set`);
+    if (r.sensor) fact('sensor bake', r.sensor.baked ? `${r.sensor.layout} grid, ${r.sensor.method === 'bilinear' ? 'bilinear' : 'Malvar–He–Cutler'} fill-in, photon noise ${fmt(r.sensor.noiseLevels, 1)} lv; pattern ${Math.round(r.sensor.inFile * 100)} % in the file, ${Math.round(r.sensor.posted * 100)} % after the re-save (original ${Math.round(r.sensor.original * 100)} %)` : 'off');
     if (r.settled)
       fact(
         'block edges written on their grid',
@@ -1331,7 +1371,8 @@ export class App {
     this.exportBtn.disabled = true;
     try {
       const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
-        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^regrain$/, 'writing again with more grain so the copy carries the amount set').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
+        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^regrain$/, 'writing again with more grain so the copy carries the amount set').replace(/^bake$/, 'baking through a camera sensor').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
+        this.bake,
       );
       if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
@@ -1441,6 +1482,7 @@ export class App {
         this.busy = true;
         const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
           this.setStatus(`Batch ${i + 1}/${files.length}: ${f.name} — ${stage}`, fr),
+          this.bake,
         );
         this.report = report;
         this.renderExport();

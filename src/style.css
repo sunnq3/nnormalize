@@ -37,14 +37,15 @@ body {
 }
 
 #app {
-  --side-w: 520px;
+  --side-w: clamp(380px, 36vw, 560px);
   height: 100%;
   display: grid;
-  grid-template-rows: 44px 1fr;
-  grid-template-columns: 1fr var(--side-w);
+  grid-template-rows: 44px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) var(--side-w);
   grid-template-areas:
     'top top'
-    'view side';
+    'view side'
+    'check side';
 }
 
 button,
@@ -464,10 +465,11 @@ input[type='number'] {
 @media (max-width: 900px) {
   #app {
     grid-template-columns: 1fr;
-    grid-template-rows: 44px 1fr 1fr;
+    grid-template-rows: 44px minmax(0, 1fr) auto minmax(0, 1fr);
     grid-template-areas:
       'top'
       'view'
+      'check'
       'side';
   }
   .side {
@@ -630,21 +632,18 @@ details.more > summary {
   padding: 8px 14px;
 }
 
-/* ---- live check, pinned to the bottom of the side panel ---- */
-.side > * {
-  flex-shrink: 0;
-}
+/* ---- live check: its own strip under the photo, always on screen ---- */
 .livecheck {
-  position: sticky;
-  bottom: 0;
-  margin-top: auto;
+  grid-area: check;
   background: var(--panel-raised);
   border-top: 1px solid var(--line-strong);
-  box-shadow: 0 -6px 16px rgba(0, 0, 0, 0.25);
-  padding: 8px 12px 10px;
-  max-height: 45vh;
+  padding: 8px 14px 10px;
+  max-height: 38vh;
   overflow-y: auto;
-  z-index: 2;
+  min-width: 0;
+}
+.livecheck table.survival {
+  max-width: 760px;
 }
 .livecheck .livehead {
   display: flex;
@@ -695,4 +694,25 @@ details.more > summary {
 }
 .livecheck table.survival tr {
   cursor: pointer;
+}
+.side > * {
+  flex-shrink: 0;
+}
+
+.view .toolbar {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+.view .toolbar button,
+.view .toolbar label {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.export label.bake {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 8px 0;
+  color: var(--ink-soft);
 }

@@ -4,6 +4,7 @@
 
 import { subsampleGrid } from '../dsp/tiles';
 import { bandingStrength, detectBanding } from '../dsp/banding';
+import { detectCfaPhase, measureFalseColour } from '../dsp/cfa';
 import { fitCameraModel, measureEdgeProfile, reachableSigma, targetSigma } from '../dsp/edges';
 import { backgroundModel } from '../dsp/background';
 import { detectBlockGrid } from '../dsp/blocks';
@@ -27,6 +28,7 @@ import {
   type RingingFinding,
   type GrainFinding,
   type EdgesFinding,
+  type FringesFinding,
   type BandingFinding,
   type HotPixelFinding,
   type JpegGridFinding,
@@ -455,6 +457,7 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
               fitRms: m.rms,
               targetWidthPx,
               reachableWidthPx: reach,
+              keepCrisp: 0.3,
               grainSigma: nmodel.globalSigma,
               amount: 1,
             },
@@ -464,6 +467,33 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       }
     }
     t = mark('edges', t);
+
+    // --- false colour and fringes from the camera's demosaicing -------------------
+    progress('fringes', 0);
+    {
+      const levelName = optsIn.level ?? defaultAnalysisOptions.level;
+      const [Yf, Cbf, Crf] = toYCbCr(r, g, b);
+      const fc = measureFalseColour(Yf, Cbf, Crf);
+      if (fc.detailLevels >= 1.5 && fc.detailLevels >= 1.5 * fc.flatLevels && fc.detailFraction >= 0.005) {
+        const enabled = levelName !== 'gentle';
+        const ff: FringesFinding = {
+          id: 'fringes',
+          kind: 'fringes',
+          label: 'False colour on fine detail',
+          description: `colour that does not follow brightness on fine detail: ${fc.detailLevels.toFixed(1)} levels (smooth areas ${fc.flatLevels.toFixed(1)})`,
+          severity: Math.min(1, fc.detailLevels / 6),
+          extent: fc.detailFraction,
+          enabled,
+          confidence: fc.detailLevels >= 3 ? 'high' : 'medium',
+          note: enabled ? '' : 'Left alone at the Gentle level.',
+          strength: 1,
+          method: 'fringe-fix',
+          details: { detailLevels: fc.detailLevels, flatLevels: fc.flatLevels, detailFraction: fc.detailFraction, amount: 1 },
+        };
+        findings.push(ff);
+      }
+    }
+    t = mark('fringes', t);
 
     // --- banding in smooth areas -------------------------------------------------
     progress('banding', 0);
@@ -521,6 +551,7 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
   }
   timings.total = Math.round(performance.now() - t0);
 
+  const cfa = detectCfaPhase(input.planes);
   return {
     w,
     h,
@@ -538,5 +569,6 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     noise: noiseDetails,
     timings,
     notChecked: NOT_CHECKED,
+    cfa,
   };
 }

@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges';
+export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges' | 'fringes';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct' | 'fringe-fix';
 
 export interface HarmonicInfo {
   order: number;
@@ -108,6 +108,15 @@ export interface DetailDetails {
   maxBoostDb: number;
 }
 
+export interface FringesDetails {
+  /** colour that does not follow brightness on fine detail, levels */
+  detailLevels: number;
+  /** the same on smooth areas, levels */
+  flatLevels: number;
+  detailFraction: number;
+  amount: number; // 0..1
+}
+
 export interface EdgesDetails {
   /** the camera's edge profile from the photo's sharpest straight edges */
   t: Float32Array;
@@ -124,6 +133,8 @@ export interface EdgesDetails {
   targetWidthPx: number;
   /** what the correction can reach without new outlines, px */
   reachableWidthPx: number;
+  /** share of the camera's finest (1 px) sharpening to keep, 0..1 */
+  keepCrisp: number;
   grainSigma: number;
   amount: number; // 0..1
 }
@@ -227,7 +238,13 @@ export interface EdgesFinding extends FindingBase {
   details: EdgesDetails;
 }
 
-export type Finding = EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
+export interface FringesFinding extends FindingBase {
+  kind: 'fringes';
+  method: 'fringe-fix';
+  details: FringesDetails;
+}
+
+export type Finding = FringesFinding | EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
 
 export interface SpectrumView {
   size: number;
@@ -306,13 +323,14 @@ export interface Analysis {
   timings: Record<string, number>;
   /** What this analysis does NOT look for, stated plainly for the report. */
   notChecked: string[];
+  /** where the camera's sensor grid sat (green is read from the photo; red/blue placement is assumed) */
+  cfa: { redX: 0 | 1; redY: 0 | 1; strength: number; detected: boolean };
 }
 
 export const NOT_CHECKED = [
   'dust spots, hairs or scratches larger than a pixel',
   'lens flare, ghosting and chromatic aberration',
-  'motion blur, focus and sharpness',
+  'motion blur and missed focus',
   'blown highlights and crushed shadows',
   'colour casts and white balance',
-  'demosaicing errors that are not periodic',
 ];

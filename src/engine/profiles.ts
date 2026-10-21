@@ -47,8 +47,10 @@ export const PROFILES: Record<ProfileId, DestinationProfile> = {
   master: {
     id: 'master',
     label: 'Master copy',
-    hint: 'Quality 95, full colour detail. Keep this one; the check still shows what Reddit would do to it.',
-    encode: { quality: 95, chroma: '4:4:4', progressive: true, trellis: true, chromaQuality: null, tables: 'mozjpeg', fixedPointPasses: 0 },
+    hint: 'Quality 95, full colour detail, standard tables so the finest detail (grain, the sensor grid) is kept. Keep this one; the check still shows what Reddit would do to it.',
+    // standard tables and no trellis: trellis and the tuned tables drop the
+    // finest detail, which is where a sensor's 2×2 grid and fine grain live
+    encode: { quality: 95, chroma: '4:4:4', progressive: true, trellis: false, chromaQuality: null, tables: 'annex-k', fixedPointPasses: 0 },
     check: { label: 'Reddit (quality 75, same grid)', options: { ...redditEncode, fixedPointPasses: 0 } },
   },
   custom: {
