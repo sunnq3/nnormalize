@@ -9,6 +9,7 @@ import { deblockDelta } from '../dsp/blocks';
 import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr } from '../dsp/chroma';
 import { grainDelta } from '../dsp/grain';
 import { debandDelta } from '../dsp/banding';
+import { correctionGainDb, outlineClampDelta } from '../dsp/edges';
 import { bandGains, detailBalance, detailDelta, radialProfile, wantedGainDb } from '../dsp/spectrum';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
 import { median9 } from '../dsp/hotpixels';
@@ -89,6 +90,22 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
     const gains = bandGains(bal.f, wantedGainDb(bal, d.mode, d.maxBoostDb), d.amount);
     progress(0.5);
     const delta = detailDelta(Y, gains);
+    progress(1);
+    return [delta, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }];
+  }
+  if (finding.kind === 'edges') {
+    // brightness only: the same delta goes to all three channels
+    const d = finding.details;
+    const Y = lumaOf(planes);
+    const f = Float32Array.from({ length: 128 }, (_, i) => (i + 1) / 256);
+    const model = { blurSigma: d.blurSigma, amounts: d.amounts, rms: d.fitRms };
+    const gains = bandGains(f, correctionGainDb(model, d.targetWidthPx, f, d.grainSigma), d.amount);
+    progress(0.4);
+    const delta = detailDelta(Y, gains);
+    // then the lopsided outlines the linear step cannot reach, beside flat areas only
+    const lin = { w: Y.w, h: Y.h, data: Y.data.map((v, i) => v + delta.data[i]) };
+    const clamp = outlineClampDelta(lin, d.amount);
+    for (let i = 0; i < delta.data.length; i++) delta.data[i] += clamp.data[i];
     progress(1);
     return [delta, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }];
   }

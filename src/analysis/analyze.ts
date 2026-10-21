@@ -4,7 +4,7 @@
 
 import { subsampleGrid } from '../dsp/tiles';
 import { bandingStrength, detectBanding } from '../dsp/banding';
-import { detailBalance, radialProfile } from '../dsp/spectrum';
+import { fitCameraModel, measureEdgeProfile, reachableSigma, targetSigma } from '../dsp/edges';
 import { backgroundModel } from '../dsp/background';
 import { detectBlockGrid } from '../dsp/blocks';
 import { measureChromaNoise, measureRinging, toYCbCr } from '../dsp/chroma';
@@ -26,7 +26,7 @@ import {
   type Finding,
   type RingingFinding,
   type GrainFinding,
-  type DetailFinding,
+  type EdgesFinding,
   type BandingFinding,
   type HotPixelFinding,
   type JpegGridFinding,
@@ -414,43 +414,56 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     }
     t = mark('ringing', t);
 
-    // --- detail balance ---------------------------------------------------------
-    progress('detail', 0);
+    // --- camera blur and sharpening, from the photo's straight edges -------------
+    // (the earlier detail-balance check judged fine detail against the photo's
+    // own coarser detail; a camera that softens everything fools that, so the
+    // reference here is that real edges are sharp steps)
+    progress('edges', 0);
     {
       const levelName = optsIn.level ?? defaultAnalysisOptions.level;
-      const bal = detailBalance(radialProfile(cleanLuma), nmodel.globalSigma);
-      const mode: 'smooth' | 'sharp' | null = bal.excessDb >= 2.5 ? 'sharp' : bal.deficitDb >= 3 ? 'smooth' : null;
-      if (mode) {
-        const enabled = mode === 'sharp' ? levelName !== 'gentle' : levelName === 'strong' || levelName === 'maximum';
-        const df: DetailFinding = {
-          id: 'detail',
-          kind: 'detail',
-          label: mode === 'sharp' ? 'Oversharpened' : 'Too smooth',
-          description: mode === 'sharp' ? `fine detail ${bal.excessDb.toFixed(1)} dB above the scene's reference` : `fine detail ${bal.deficitDb.toFixed(1)} dB below the scene's reference`,
-          severity: Math.min(1, (mode === 'sharp' ? bal.excessDb : bal.deficitDb) / 10),
-          extent: 1,
-          enabled,
-          confidence: (mode === 'sharp' ? bal.excessDb : bal.deficitDb) >= 5 ? 'high' : 'medium',
-          note: enabled ? '' : mode === 'smooth' ? 'Bringing detail back is on from the Strong level. Tick it to try it here.' : 'Left alone at the Gentle level.',
-          strength: 1,
-          method: 'detail-balance',
-          details: {
-            mode,
-            deficitDb: bal.deficitDb,
-            excessDb: bal.excessDb,
-            line: bal.line,
-            grainSigma: nmodel.globalSigma,
-            f: bal.f,
-            measured: bal.measured,
-            reference: bal.reference,
-            amount: 1,
-            maxBoostDb: levelName === 'maximum' ? 9 : 6,
-          },
-        };
-        findings.push(df);
+      const prof = measureEdgeProfile(cleanLuma);
+      if (prof) {
+        const m = fitCameraModel(prof);
+        const targetWidthPx = 1.8;
+        const reach = reachableSigma(m, targetSigma(targetWidthPx)) * 2.563;
+        const outline = Math.max(prof.overshoot, prof.undershoot);
+        const softer = reach < prof.widthPx * 0.9;
+        const sharpened = outline >= 0.04;
+        if (sharpened || softer) {
+          const enabled = levelName === 'gentle' ? false : sharpened || levelName === 'strong' || levelName === 'maximum';
+          const ef: EdgesFinding = {
+            id: 'edges',
+            kind: 'edges',
+            label: sharpened ? 'Sharpening outlines' : 'Blurry edges',
+            description: `edges ${prof.widthPx.toFixed(1)} px wide, outlines ${(outline * 100).toFixed(0)} % of edge height, from ${prof.count} edges`,
+            severity: Math.min(1, outline / 0.2 + Math.max(0, prof.widthPx - 2) / 4),
+            extent: 1,
+            enabled,
+            confidence: prof.count >= 150 && m.rms < 0.03 ? 'high' : 'medium',
+            note: enabled ? '' : levelName === 'gentle' ? 'Left alone at the Gentle level.' : 'Sharpening soft edges is on from the Strong level. Tick it to try it here.',
+            strength: 1,
+            method: 'edge-correct',
+            details: {
+              t: prof.t,
+              esf: prof.esf,
+              count: prof.count,
+              widthPx: prof.widthPx,
+              overshoot: prof.overshoot,
+              undershoot: prof.undershoot,
+              blurSigma: m.blurSigma,
+              amounts: m.amounts,
+              fitRms: m.rms,
+              targetWidthPx,
+              reachableWidthPx: reach,
+              grainSigma: nmodel.globalSigma,
+              amount: 1,
+            },
+          };
+          findings.push(ef);
+        }
       }
     }
-    t = mark('detail', t);
+    t = mark('edges', t);
 
     // --- banding in smooth areas -------------------------------------------------
     progress('banding', 0);

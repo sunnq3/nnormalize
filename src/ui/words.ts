@@ -37,6 +37,8 @@ export function plainLabel(f: Finding): string {
       return f.details.mode === 'sharp' ? 'Oversharpened' : 'Too smooth (fine detail missing)';
     case 'banding':
       return 'Banding in smooth areas';
+    case 'edges':
+      return Math.max(f.details.overshoot, f.details.undershoot) >= 0.04 ? 'Sharpening outlines and blur' : 'Blurry edges';
   }
 }
 
@@ -79,6 +81,12 @@ export function plainDescription(f: Finding): string {
       if (d.mode === 'sharp') return `fine detail is ${fmt(10 ** (d.excessDb / 20), 1)}× stronger than a camera photo of this scene would have: outlines and crunchy texture from sharpening; this fix tones it down`;
       return `fine detail is at ${fmt(100 * 10 ** (-d.deficitDb / 20), 0)} % of what a camera photo of this scene would have: smoothed, denoised or upscaled; this fix brings it back by up to ${fmt(10 ** (d.maxBoostDb / 20), 1)}×`;
     }
+    case 'edges': {
+      const d = f.details;
+      const o = Math.max(d.overshoot, d.undershoot);
+      const outl = o >= 0.04 ? `bright/dark outlines of ${fmt(o * 100, 0)} % of the edge's height (the pasted-on look)` : 'no outlines';
+      return `measured on ${d.count} of the photo's sharpest edges: they spread over ${fmt(d.widthPx, 1)} px with ${outl}. This fix removes the outlines and sharpens the edges to ${fmt(d.reachableWidthPx, 1)} px`;
+    }
     case 'banding': {
       const d = f.details;
       const how = d.strengthLevels >= 0.4 ? 'clearly visible' : d.strengthLevels >= 0.2 ? 'visible' : 'faint';
@@ -118,6 +126,8 @@ export function plainFix(f: Finding): string {
       return f.details.mode === 'sharp'
         ? 'The detail bands that sharpening pushed up are brought back down to where a camera photo of this scene would sit. Coarse shapes and colour are untouched.'
         : 'The fine detail bands are raised toward where a camera photo of this scene would sit, judged against the photo’s own coarser detail. Only brightness detail changes; nothing past what a re-save keeps is boosted.';
+    case 'edges':
+      return 'Real edges are sharp steps, so the width and outlines your photo shows at its sharpest edges are what the camera added. The camera’s blur and its sharpening were measured there and fitted; the sharpening is undone exactly, and the blur is reduced as far as it can be without creating new outlines. Where an edge borders a flat area (sky, wall, skin), any outline left is pulled back to that area’s own level; edges with texture on both sides keep their texture. Brightness only; colour is untouched.';
     case 'banding':
       return 'Inside the banded areas only, the steps are smoothed back into an even ramp with an edge-keeping filter (real edges stay), and a very fine dither is added so saving to 8 bits does not cut new steps.';
     case 'grain':

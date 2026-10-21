@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding';
+export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct';
 
 export interface HarmonicInfo {
   order: number;
@@ -108,6 +108,26 @@ export interface DetailDetails {
   maxBoostDb: number;
 }
 
+export interface EdgesDetails {
+  /** the camera's edge profile from the photo's sharpest straight edges */
+  t: Float32Array;
+  esf: Float32Array;
+  count: number;
+  widthPx: number;
+  overshoot: number;
+  undershoot: number;
+  /** fitted camera: Gaussian blur plus unsharp masking at USM_SIGMAS */
+  blurSigma: number;
+  amounts: number[];
+  fitRms: number;
+  /** the 10–90 % edge width to aim for, px */
+  targetWidthPx: number;
+  /** what the correction can reach without new outlines, px */
+  reachableWidthPx: number;
+  grainSigma: number;
+  amount: number; // 0..1
+}
+
 export interface BandingDetails {
   block: number;
   bw: number;
@@ -201,7 +221,13 @@ export interface BandingFinding extends FindingBase {
   details: BandingDetails;
 }
 
-export type Finding = PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
+export interface EdgesFinding extends FindingBase {
+  kind: 'edges';
+  method: 'edge-correct';
+  details: EdgesDetails;
+}
+
+export type Finding = EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
 
 export interface SpectrumView {
   size: number;

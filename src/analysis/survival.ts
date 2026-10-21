@@ -17,6 +17,7 @@ import { measureChromaNoise, measureRinging, toYCbCr } from '../dsp/chroma';
 import { median9 } from '../dsp/hotpixels';
 import { bandingStrength } from '../dsp/banding';
 import { detailBalance, radialProfile } from '../dsp/spectrum';
+import { measureEdgeProfile } from '../dsp/edges';
 import { noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
 import { lumaPlane, type Plane } from '../dsp/plane';
@@ -270,6 +271,31 @@ export function measureSurvival(
               : d.mode === 'sharp'
                 ? 'the re-save leaves some of the oversharpening.'
                 : 'the re-save smooths away part of the detail brought back; raise the most it may add if the copy looks soft.',
+        });
+        break;
+      }
+      case 'edges': {
+        const prof = (p: Plane): number => {
+          const e = measureEdgeProfile(p, { maxEdges: 2000 });
+          return e ? Math.max(e.overshoot, e.undershoot) * 100 : NaN;
+        };
+        const o0 = memo(`${f.id}:s`, () => prof(lumSf()));
+        const o1 = memo(`${f.id}:sd`, () => prof(lumSDf()));
+        const o2 = prof(lumRD);
+        if (!Number.isFinite(o1) || !Number.isFinite(o2)) break;
+        const retained = o1 > 1 ? Math.max(0, Math.min(1, 1 - o2 / o1)) : 1;
+        const v: Verdict = o2 <= 4 || retained >= 0.6 ? 'survives' : retained >= 0.3 ? 'partly' : 'lost';
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: '%',
+          source: o0,
+          sourceOnDest: o1,
+          resultOnDest: o2,
+          retained,
+          verdict: v,
+          note: v === 'survives' ? 'edges stay clean, without outlines.' : 'the re-save sharpens or rings some outline back onto the edges.',
         });
         break;
       }

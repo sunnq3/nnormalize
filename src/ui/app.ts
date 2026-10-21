@@ -418,8 +418,8 @@ export class App {
     for (const fx of fixes) {
       const f = this.analysis?.findings.find((x) => x.id === fx.id);
       const name = f ? plainLabel(f) : fx.label;
-      const unit = fx.unit === 'pixels' ? '' : fx.unit === 'dB' ? ' dB' : ' lv';
-      const digits = fx.unit === 'pixels' ? 0 : fx.unit === 'dB' ? 1 : 2;
+      const unit = fx.unit === 'pixels' ? '' : fx.unit === 'dB' ? ' dB' : fx.unit === '%' ? ' %' : ' lv';
+      const digits = fx.unit === 'pixels' || fx.unit === '%' ? 0 : fx.unit === 'dB' ? 1 : 2;
       tbl.appendChild(
         el(
           'tr',
@@ -866,7 +866,18 @@ export class App {
       });
       box.appendChild(el('div', { class: 'row', title: 'The most the fine detail may be raised. Higher brings back more, and more of whatever noise is there' }, el('span', {}, 'Most it may add'), mb, mv));
     }
-    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding') {
+    if (f.kind === 'edges') {
+      const tw = el('input', { type: 'range', min: '12', max: '35', value: String(Math.round(f.details.targetWidthPx * 10)) }) as HTMLInputElement;
+      const tv = el('span', { class: 'val' }, `${fmt(f.details.targetWidthPx, 1)} px`);
+      tw.addEventListener('input', () => (tv.textContent = `${fmt(Number(tw.value) / 10, 1)} px`));
+      tw.addEventListener('change', () => {
+        f.details.targetWidthPx = Number(tw.value) / 10;
+        f.enabled = true;
+        void this.rebuildFrom(f);
+      });
+      box.appendChild(el('div', { class: 'row', title: 'How wide a sharp edge should be. A good camera gives about 1.5–2 px. The fix stops short of this when going further would make new outlines' }, el('span', {}, 'Edge to aim for'), tw, tv));
+    }
+    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges') {
       const am = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.amount * 100)) }) as HTMLInputElement;
       const av = el('span', { class: 'val' }, `${Math.round(f.details.amount * 100)} %`);
       am.addEventListener('input', () => (av.textContent = `${am.value} %`));
@@ -874,7 +885,7 @@ export class App {
         f.details.amount = Number(am.value) / 100;
         void this.rebuildFrom(f);
       });
-      box.appendChild(el('div', { class: 'row' }, el('span', {}, f.kind === 'detail' ? 'Amount' : f.kind === 'banding' ? 'Smooth' : 'Remove'), am, av));
+      box.appendChild(el('div', { class: 'row' }, el('span', {}, f.kind === 'detail' || f.kind === 'edges' ? 'Amount' : f.kind === 'banding' ? 'Smooth' : 'Remove'), am, av));
     }
     if (f.kind === 'grain') {
       const am = el('input', { type: 'range', min: '5', max: '60', value: String(Math.round(f.details.targetLevels * 10)) }) as HTMLInputElement;
@@ -1033,6 +1044,15 @@ export class App {
         return `${fmt(d.measured[i] - d.reference[i], 1)} dB`;
       };
       fact('fine detail vs reference', `${at(0.12)} · ${at(0.2)} · ${at(0.3)} (at 8, 5, 3 px)`);
+    } else if (f.kind === 'edges') {
+      const d = f.details;
+      fact('edges used', `${d.count} (the sharpest fifth)`);
+      fact('edge width now', `${fmt(d.widthPx, 2)} px (10–90 %)`);
+      fact('outlines', `${fmt(d.overshoot * 100, 1)} % bright, ${fmt(d.undershoot * 100, 1)} % dark`);
+      fact('camera blur', `${fmt(d.blurSigma, 2)} px (Gaussian sigma)`);
+      fact('camera sharpening', d.amounts.map((a, k) => `${fmt(a, 2)} at ${[1, 2.5, 6][k]} px`).join(', '));
+      fact('model fit', `${fmt(d.fitRms * 100, 1)} % rms`);
+      fact('reachable without new outlines', `${fmt(d.reachableWidthPx, 2)} px`);
     } else if (f.kind === 'banding') {
       fact('step', `${f.details.stepLevels} level${f.details.stepLevels === 1 ? '' : 's'}`);
       fact('visible steps', `${fmt(f.details.strengthLevels, 2)} levels`);
