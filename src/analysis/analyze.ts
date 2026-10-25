@@ -5,6 +5,9 @@
 import { subsampleGrid } from '../dsp/tiles';
 import { bandingStrength, detectBanding } from '../dsp/banding';
 import { detectCfaPhase, measureFalseColour } from '../dsp/cfa';
+import { measureFlatness, toneDelta, toneParams } from '../dsp/tone';
+import { glowFix } from '../dsp/glow';
+import { measureTexture, textureDelta } from '../dsp/texture';
 import { fitCameraModel, measureEdgeProfile, reachableSigma, targetSigma } from '../dsp/edges';
 import { backgroundModel } from '../dsp/background';
 import { detectBlockGrid } from '../dsp/blocks';
@@ -26,9 +29,11 @@ import {
   type ChromaFinding,
   type Finding,
   type RingingFinding,
-  type GrainFinding,
   type EdgesFinding,
   type FringesFinding,
+  type ToneFinding,
+  type GlowFinding,
+  type TextureFinding,
   type BandingFinding,
   type HotPixelFinding,
   type JpegGridFinding,
@@ -457,7 +462,7 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
               fitRms: m.rms,
               targetWidthPx,
               reachableWidthPx: reach,
-              keepCrisp: 0.3,
+              keepCrisp: 0.45,
               grainSigma: nmodel.globalSigma,
               amount: 1,
             },
@@ -495,6 +500,104 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     }
     t = mark('fringes', t);
 
+    // --- the wide glow around subjects ---------------------------------------------
+    progress('glow', 0);
+    {
+      const levelName = optsIn.level ?? defaultAnalysisOptions.level;
+      const gr = glowFix(cleanLuma, 1);
+      if (gr.sides > 0 && gr.glowLevels >= 2) {
+        const enabled = levelName !== 'gentle';
+        const gf: GlowFinding = {
+          id: 'glow',
+          kind: 'glow',
+          label: 'Glow around subjects',
+          description: `a ${gr.glowLevels.toFixed(1)}-level glow along ${(gr.share * 100).toFixed(0)} % of smooth edges`,
+          severity: Math.min(1, gr.glowLevels / 10),
+          extent: gr.coverage,
+          enabled,
+          confidence: gr.share >= 0.5 ? 'high' : 'medium',
+          note: enabled ? '' : 'Left alone at the Gentle level.',
+          strength: 1,
+          method: 'glow-fix',
+          details: { glowLevels: gr.glowLevels, sides: gr.sides, share: gr.share, coverage: gr.coverage, amount: 1 },
+        };
+        findings.push(gf);
+      }
+    }
+    t = mark('glow', t);
+
+    // --- fine texture weakened by noise reduction ------------------------------------
+    progress('texture', 0);
+    {
+      const levelName = optsIn.level ?? defaultAnalysisOptions.level;
+      const tm = measureTexture(cleanLuma);
+      if (tm.weakFraction >= 0.05 && tm.share < 0.9) {
+        // the effect, estimated on a centred crop
+        const cs = Math.min(512, w, h);
+        const cx = Math.floor((w - cs) / 2);
+        const cy = Math.floor((h - cs) / 2);
+        const crop = { w: cs, h: cs, data: new Float32Array(cs * cs) };
+        for (let y = 0; y < cs; y++) crop.data.set(cleanLuma.data.subarray((cy + y) * w + cx, (cy + y) * w + cx + cs), y * cs);
+        const before = measureTexture(crop);
+        const dt = textureDelta(crop, 1);
+        const after = measureTexture({ w: cs, h: cs, data: crop.data.map((v, i) => v + dt.data[i]) });
+        const expectedShare = Math.max(tm.share, tm.share + (after.share - before.share));
+        const enabled = levelName !== 'gentle';
+        const xf: TextureFinding = {
+          id: 'texture',
+          kind: 'texture',
+          label: 'Smeared fine texture',
+          description: `fine texture at ${(tm.share * 100).toFixed(0)} % of what a scene like this carries, short in ${(tm.weakFraction * 100).toFixed(0)} % of the photo`,
+          severity: Math.min(1, (1 - tm.share) * 2),
+          extent: tm.weakFraction,
+          enabled,
+          confidence: tm.weakFraction >= 0.15 ? 'high' : 'medium',
+          note: enabled ? '' : 'Left alone at the Gentle level.',
+          strength: 1,
+          method: 'texture-restore',
+          details: { share: tm.share, weakFraction: tm.weakFraction, expectedShare, amount: 1 },
+        };
+        findings.push(xf);
+      }
+    }
+    t = mark('texture', t);
+
+    // --- contrast and depth (undoing the phone's flattening) ---------------------
+    progress('tone', 0);
+    {
+      const levelName = optsIn.level ?? defaultAnalysisOptions.level;
+      const fl = measureFlatness(cleanLuma);
+      // estimate the effect on a 4× smaller copy, for the check to compare against
+      const f4 = Math.max(1, Math.floor(Math.min(w, h) / 400));
+      const sw = Math.floor(w / f4);
+      const sh = Math.floor(h / f4);
+      const small = { w: sw, h: sh, data: new Float32Array(sw * sh) };
+      for (let y = 0; y < sh; y++) for (let x = 0; x < sw; x++) small.data[y * sw + x] = cleanLuma.data[y * f4 * w + x * f4];
+      const pr = toneParams(levelName, 1, nmodel.globalSigma);
+      const dsm = toneDelta(small, pr, fl.shadowLevels);
+      const after = measureFlatness({ w: sw, h: sh, data: small.data.map((v, i) => v + dsm.data[i]) });
+      const before = measureFlatness(small);
+      const expectedRatio = before.localContrast > 0.1 ? after.localContrast / before.localContrast : 1;
+      const lifted = fl.shadowLevels >= 8;
+      const enabled = levelName !== 'gentle';
+      const tf: ToneFinding = {
+        id: 'tone',
+        kind: 'tone',
+        label: 'Flat, low contrast',
+        description: `darkest shadows at ${fl.shadowLevels.toFixed(0)} levels; contrast between neighbouring areas ${fl.localContrast.toFixed(1)} levels`,
+        severity: Math.min(1, Math.max(0, (fl.shadowLevels - 4) / 30) + 0.3),
+        extent: 1,
+        enabled,
+        confidence: lifted ? 'high' : 'medium',
+        note: enabled ? '' : 'Left alone at the Gentle level.',
+        strength: 1,
+        method: 'local-laplacian',
+        details: { shadowLevels: fl.shadowLevels, highlightLevels: fl.highlightLevels, localContrast: fl.localContrast, expectedRatio, level: levelName, noise: nmodel.globalSigma, amount: 1 },
+      };
+      findings.push(tf);
+    }
+    t = mark('tone', t);
+
     // --- banding in smooth areas -------------------------------------------------
     progress('banding', 0);
     {
@@ -522,32 +625,6 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
     }
     t = mark('banding', t);
 
-    // --- grain put back ------------------------------------------------------
-    // Clean-up leaves smooth areas looking like plastic. A fine photon-like
-    // grain goes back everywhere the photo is smoother than the target: on by
-    // default at the levels that remove grain, available at the others.
-    {
-      const base = nmodel.globalSigma * 255;
-      // about half the photo's own grain, kept between 2 and 3 levels: enough
-      // to come through a quality-75 re-save, not enough to be seen as noise
-      const targetLevels = Math.round(Math.max(2, Math.min(3, base * 0.5)) * 10) / 10;
-      const gf: GrainFinding = {
-        id: 'grain',
-        kind: 'grain',
-        label: 'Put back grain',
-        description: `fine grain of ${targetLevels.toFixed(1)} levels added wherever the cleaned photo is smoother than that`,
-        severity: 0,
-        extent: 1,
-        enabled: level.noiseReduction > 0,
-        confidence: 'high',
-        note: level.noiseReduction > 0 ? '' : 'Off at this level, which keeps the photo’s own grain. Tick it if the result looks too smooth.',
-        strength: 1,
-        method: 'regrain',
-        details: { targetLevels, baseLevels: base, colour: 0.3, seed: 0x97a1 },
-      };
-      findings.push(gf);
-    }
-    mark('grain', t);
   }
   timings.total = Math.round(performance.now() - t0);
 

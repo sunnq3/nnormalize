@@ -19,6 +19,9 @@ import { bandingStrength } from '../dsp/banding';
 import { detailBalance, radialProfile } from '../dsp/spectrum';
 import { measureEdgeProfile } from '../dsp/edges';
 import { measureFalseColour } from '../dsp/cfa';
+import { measureFlatness } from '../dsp/tone';
+import { glowFix } from '../dsp/glow';
+import { measureTexture } from '../dsp/texture';
 import { noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
 import { lumaPlane, type Plane } from '../dsp/plane';
@@ -272,6 +275,71 @@ export function measureSurvival(
               : d.mode === 'sharp'
                 ? 'the re-save leaves some of the oversharpening.'
                 : 'the re-save smooths away part of the detail brought back; raise the most it may add if the copy looks soft.',
+        });
+        break;
+      }
+      case 'texture': {
+        const sh = (p: Plane): number => measureTexture(p).share;
+        const s0 = memo(`${f.id}:s`, () => sh(lumSf()));
+        const s1 = memo(`${f.id}:sd`, () => sh(lumSDf()));
+        const s2 = sh(lumRD);
+        const want = (f.details.expectedShare - f.details.share) * f.details.amount;
+        const retained = want > 0.005 ? Math.max(0, Math.min(1, (s2 - s1) / want)) : 1;
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: '%',
+          source: s0 * 100,
+          sourceOnDest: s1 * 100,
+          resultOnDest: s2 * 100,
+          retained,
+          verdict: verdictFor(retained),
+          note: retained >= 0.8 ? 'the recovered texture comes through.' : 'the re-save smooths away part of the recovered texture.',
+        });
+        break;
+      }
+      case 'glow': {
+        const gl = (p: Plane): number => {
+          const r = glowFix(p, 0);
+          return r.share * r.glowLevels;
+        };
+        const v0 = memo(`${f.id}:s`, () => gl(lumSf()));
+        const v1 = memo(`${f.id}:sd`, () => gl(lumSDf()));
+        const v2 = gl(lumRD);
+        const retained = v1 > 0.05 ? Math.max(0, Math.min(1, 1 - v2 / v1)) : 1;
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: v0,
+          sourceOnDest: v1,
+          resultOnDest: v2,
+          retained,
+          verdict: verdictFor(retained),
+          note: retained >= 0.8 ? 'the glow stays gone.' : 'some glow shows again after the re-save.',
+        });
+        break;
+      }
+      case 'tone': {
+        const lc = (p: Plane): number => measureFlatness(p).localContrast;
+        const c0 = memo(`${f.id}:s`, () => lc(lumSf()));
+        const c1 = memo(`${f.id}:sd`, () => lc(lumSDf()));
+        const c2 = lc(lumRD);
+        const want = (f.details.expectedRatio - 1) * f.details.amount;
+        const retained = want > 0.01 && c1 > 0.1 ? Math.max(0, Math.min(1, (c2 / c1 - 1) / want)) : 1;
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: c0,
+          sourceOnDest: c1,
+          resultOnDest: c2,
+          retained,
+          verdict: verdictFor(retained),
+          note: retained >= 0.8 ? 'depth and contrast come through.' : 'part of the added contrast is lost in the re-save.',
         });
         break;
       }

@@ -82,7 +82,7 @@ export interface RoundTripReport {
 }
 
 /** The sensor bake at the end: off, sharp (Malvar–He–Cutler, subtle noise), or matching the original's grid. */
-export type BakeSetting = 'off' | 'sharp' | 'match';
+export type BakeSetting = 'off' | 'clean' | 'sharp' | 'match';
 
 /** The sensor bake: whether it ran, the grid used, and how clearly the 2×2 sensor pattern shows (0…1). */
 export interface SensorReport {

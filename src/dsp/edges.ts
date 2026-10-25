@@ -367,16 +367,18 @@ export function targetSigma(widthPx: number): number {
 }
 
 /** Most the correction may raise any frequency (amplitude). */
-export const MAX_BOOST = 4;
+export const MAX_BOOST = 6;
 
 /**
  * The sharpest edge the correction can reach without overshoot: a Gaussian
- * target whose ratio to the camera's blur stays under MAX_BOOST up to 0.3
+ * target whose ratio to the camera's blur stays under MAX_BOOST up to 0.25
  * cycles/px. Going sharper would mean clipping the gain curve, and a
  * clipped curve rings (new outlines), which is what is being removed.
  */
 export function reachableSigma(m: CameraModel, wantedSigma: number): number {
-  const K = Math.log(MAX_BOOST) / (2 * Math.PI * Math.PI * 0.3 * 0.3);
+  // the boost reaches its limit at 0.25 cycles/px (4-px detail); finer than that,
+  // noise dominates and the regularisation and soft limit take over
+  const K = Math.log(MAX_BOOST) / (2 * Math.PI * Math.PI * 0.25 * 0.25);
   return Math.min(m.blurSigma, Math.max(wantedSigma, Math.sqrt(Math.max(0, m.blurSigma * m.blurSigma - K))));
 }
 
@@ -536,7 +538,7 @@ export function outlineClampDelta(Y: Plane, amount: number): Plane {
  * them, fading to 0 by ~10 px. The full correction (outlines removed) goes
  * there; texture elsewhere keeps the camera's finest crispness.
  */
-export function edgeZone(Y: Plane): Float32Array {
+export function edgeZone(Y: Plane, minGradient = 8 / 255): Float32Array {
   const { w, h } = Y;
   const d = Y.data;
   const gx = new Float32Array(w * h);
@@ -560,7 +562,7 @@ export function edgeZone(Y: Plane): Float32Array {
   const bxy = boxBlur(xy, w, h, 3);
   const edge = new Float32Array(w * h);
   for (let i = 0; i < w * h; i++) {
-    if (Math.hypot(gx[i], gy[i]) <= 8 / 255) continue;
+    if (Math.hypot(gx[i], gy[i]) <= minGradient) continue;
     const tr = bxx[i] + byy[i];
     if (tr <= 0) continue;
     if (((bxx[i] - byy[i]) ** 2 + 4 * bxy[i] * bxy[i]) / (tr * tr) >= 0.75) edge[i] = 1;
@@ -569,4 +571,42 @@ export function edgeZone(Y: Plane): Float32Array {
   const soft = boxBlur(boxBlur(near, w, h, 3), w, h, 3);
   for (let i = 0; i < soft.length; i++) soft[i] = Math.min(1, soft[i] * 1.5);
   return soft;
+}
+
+// ---------------------------------------------------------------------------
+// Where there is detail to sharpen
+// ---------------------------------------------------------------------------
+
+/**
+ * 0 in flat areas (sky, wall, skin), where the only fine content is noise and
+ * sharpening it reads as grain laid on top; 1 where there is real detail.
+ * Told apart by scale: real detail carries at least as much energy one scale
+ * up as at the finest scale, noise far less. Works however strong the noise
+ * is and wherever it varies, since it compares the area with itself.
+ */
+export function detailMask(Y: Plane, grainSigma = 0): Float32Array {
+  const { w, h } = Y;
+  const d = Y.data;
+  const low = boxBlur(boxBlur(d, w, h, 1), w, h, 1);
+  const sq = new Float32Array(w * h);
+  for (let i = 0; i < sq.length; i++) sq[i] = (d[i] - low[i]) ** 2;
+  const e = boxBlur(sq, w, h, 4);
+  for (let i = 0; i < e.length; i++) e[i] = Math.sqrt(Math.max(0, e[i]));
+  // the next scale up: real detail (power ∝ 1/f²) carries at least as much
+  // there as at the finest scale; noise, even softened by compression, much less
+  const coarse = boxBlur(boxBlur(boxBlur(d, w, h, 4), w, h, 4), w, h, 4);
+  const sqM = new Float32Array(w * h);
+  for (let i = 0; i < sqM.length; i++) sqM[i] = (low[i] - coarse[i]) ** 2;
+  const eM = boxBlur(sqM, w, h, 6);
+  const eF = boxBlur(sq, w, h, 6);
+  // near-empty areas (clean sky, smooth wall): nothing to sharpen at all
+  const floor = Math.max(0.6 / 255, 0.5 * grainSigma);
+  const m = new Float32Array(w * h);
+  for (let i = 0; i < m.length; i++) {
+    const t = Math.min(1, Math.max(0, (e[i] / floor - 1) / 1.5));
+    const ratio = Math.sqrt(Math.max(0, eM[i]) / Math.max(1e-12, eF[i]));
+    const u = Math.min(1, Math.max(0, (ratio - 0.4) / 0.45));
+    m[i] = t * t * (3 - 2 * t) * u * u * (3 - 2 * u);
+  }
+  return boxBlur(boxBlur(m, w, h, 3), w, h, 3);
 }

@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges' | 'fringes';
+export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges' | 'fringes' | 'tone' | 'glow' | 'texture';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct' | 'fringe-fix';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct' | 'fringe-fix' | 'local-laplacian' | 'glow-fix' | 'texture-restore';
 
 export interface HarmonicInfo {
   order: number;
@@ -106,6 +106,39 @@ export interface DetailDetails {
   amount: number; // 0..1
   /** most the fine detail may be raised, dB of amplitude */
   maxBoostDb: number;
+}
+
+export interface TextureDetails {
+  /** median share of the expected fine texture over textured areas (1 = natural) */
+  share: number;
+  /** fraction of the photo that is textured and clearly short of it */
+  weakFraction: number;
+  /** the share the fix should reach (estimated at analysis) */
+  expectedShare: number;
+  amount: number; // 0..1
+}
+
+export interface GlowDetails {
+  /** median glow beside edges, levels */
+  glowLevels: number;
+  sides: number;
+  /** share of smooth edge sides showing it */
+  share: number;
+  coverage: number;
+  amount: number; // 0..1
+}
+
+export interface ToneDetails {
+  /** darkest / brightest half percent, levels */
+  shadowLevels: number;
+  highlightLevels: number;
+  /** contrast between neighbouring areas, levels */
+  localContrast: number;
+  /** the local contrast the fix should give, as a ratio to now (estimated at analysis) */
+  expectedRatio: number;
+  level: 'gentle' | 'standard' | 'strong' | 'maximum';
+  noise: number;
+  amount: number; // 0..1
 }
 
 export interface FringesDetails {
@@ -244,7 +277,25 @@ export interface FringesFinding extends FindingBase {
   details: FringesDetails;
 }
 
-export type Finding = FringesFinding | EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
+export interface ToneFinding extends FindingBase {
+  kind: 'tone';
+  method: 'local-laplacian';
+  details: ToneDetails;
+}
+
+export interface GlowFinding extends FindingBase {
+  kind: 'glow';
+  method: 'glow-fix';
+  details: GlowDetails;
+}
+
+export interface TextureFinding extends FindingBase {
+  kind: 'texture';
+  method: 'texture-restore';
+  details: TextureDetails;
+}
+
+export type Finding = TextureFinding | GlowFinding | ToneFinding | FringesFinding | EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
 
 export interface SpectrumView {
   size: number;

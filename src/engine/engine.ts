@@ -24,7 +24,7 @@ import type { BakeSetting, Budget, LayerSetting, LayerStats, LiveReport, SensorR
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
 /** Order in which correction stages are applied; later stages are computed on earlier ones. */
-export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, ringing: 3, detail: 4, edges: 4, noise: 5, fringes: 5.5, chroma: 6, banding: 7, grain: 8 };
+export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, detail: 4, edges: 4, ringing: 4.5, noise: 5, fringes: 5.5, glow: 6.3, texture: 6.6, tone: 7.5, chroma: 6, banding: 7, grain: 8 };
 
 /** Findings in the order their layers should be built. */
 export function stageSorted<T extends { kind: Finding['kind'] }>(findings: T[]): T[] {
@@ -264,15 +264,15 @@ export class Engine {
     });
     const preview = deltas.map((d) => areaDownsample(d.data, w, h, factor, this.pw, this.ph));
     this.layers.set(finding.id, { id: finding.id, full, preview });
-    // stats on the luma delta
-    const lum = lumaPlane(deltas[0], deltas[1], deltas[2]);
+    // how much the picture changes, over all three channels, so colour-only fixes count too
     let s = 0;
     let mx = 0;
-    for (const v of lum.data) {
-      s += v * v;
-      if (Math.abs(v) > mx) mx = Math.abs(v);
-    }
-    return { id: finding.id, rms: Math.sqrt(s / lum.data.length) * 255, max: mx * 255, ms: Math.round(performance.now() - t0) };
+    for (const d of deltas)
+      for (const v of d.data) {
+        s += v * v;
+        if (Math.abs(v) > mx) mx = Math.abs(v);
+      }
+    return { id: finding.id, rms: Math.sqrt(s / (3 * deltas[0].data.length)) * 255, max: mx * 255, ms: Math.round(performance.now() - t0) };
   }
 
   setMask(findingId: string, w: number, h: number, data: Uint8Array): void {
@@ -510,6 +510,12 @@ export class Engine {
   private sensorMethod = 'mhc';
   private bakeThroughSensor(p: [Plane, Plane, Plane], quality: number, source: [Plane, Plane, Plane], style: BakeStyle): [Plane, Plane, Plane] {
     const cfa = this.analysis!.cfa;
+    if (style === 'clean') {
+      // re-sampled and filled in again, nothing added
+      this.sensorNoiseLevels = 0;
+      this.sensorMethod = 'mhc';
+      return rebakeThroughSensor(p, cfa);
+    }
     // as clear a grid, once written at this quality, as the original photo would show
     const n = calibrateSensorNoise(p, cfa, source, quality, 0x5e115, style);
     this.sensorNoiseLevels = n.levels;
@@ -530,7 +536,7 @@ export class Engine {
    * photo's side is kept between runs. Also tunes how much the grain put
    * back has to be raised so the copy carries the amount set.
    */
-  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions, bake: BakeSetting = 'sharp'): Promise<LiveReport> {
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions, bake: BakeSetting = 'clean'): Promise<LiveReport> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const t0 = performance.now();
     const profile = resolveProfile(profileId, customOptions);
@@ -623,7 +629,7 @@ export class Engine {
     budget: Budget,
     analysisOptions: Partial<AnalysisOptions>,
     progress: (stage: string, fraction: number) => void,
-    bake: BakeSetting = 'sharp',
+    bake: BakeSetting = 'clean',
   ): Promise<{ jpeg: Uint8Array; report: RoundTripReport }> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const profile = resolveProfile(profileId, customOptions);

@@ -333,7 +333,7 @@ function centreCrop(planes: [Plane, Plane, Plane], size: number): [Plane, Plane,
  * then the least photosite noise (0.3–4 levels at mid grey) that reaches
  * the target. Searched on a 512-px crop; the picture's own grain counts.
  */
-export type BakeStyle = 'sharp' | 'match';
+export type BakeStyle = 'clean' | 'sharp' | 'match';
 
 export function calibrateSensorNoise(planes: [Plane, Plane, Plane], phase: CfaPhase, source: [Plane, Plane, Plane], quality: number, seed: number, style: BakeStyle = 'sharp'): SensorNoise & { target: number } {
   const crop = centreCrop(planes, 512);

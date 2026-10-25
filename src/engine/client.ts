@@ -106,14 +106,14 @@ export class EngineClient {
     budget: Budget,
     analysisOptions: Partial<AnalysisOptions>,
     onProgress?: (stage: string, fraction: number) => void,
-    bake: BakeSetting = 'sharp',
+    bake: BakeSetting = 'clean',
   ): Promise<{ jpeg: Uint8Array; report: RoundTripReport }> {
     const r = await this.send({ type: 'export', layers, findings, master, profile, options, budget, analysisOptions, bake }, onProgress);
     if (r.type !== 'export') throw new Error('unexpected reply');
     return { jpeg: r.jpeg, report: r.report };
   }
 
-  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profile: ProfileId, options: JpegExportOptions, bake: BakeSetting = 'sharp'): Promise<LiveReport> {
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profile: ProfileId, options: JpegExportOptions, bake: BakeSetting = 'clean'): Promise<LiveReport> {
     const r = await this.send({ type: 'liveCheck', layers, findings, master, profile, options, bake });
     if (r.type !== 'live') throw new Error('unexpected reply');
     return r.report;

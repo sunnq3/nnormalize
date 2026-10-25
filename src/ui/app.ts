@@ -79,7 +79,7 @@ export class App {
   private exportEl!: HTMLElement;
   private settingsEl!: HTMLElement;
   private scrollToReport = false;
-  private bake: BakeSetting = 'sharp';
+  private bake: BakeSetting = 'clean';
   private liveEl!: HTMLElement;
   private liveTimer: ReturnType<typeof setTimeout> | null = null;
   private liveRunning = false;
@@ -404,7 +404,7 @@ export class App {
         'div',
         { class: 'livesub' },
         sn.baked
-          ? `Sensor bake (${sn.layout}, ${sn.method === 'bilinear' ? 'bilinear' : 'Malvar–He–Cutler'} fill-in, photon noise ${fmt(sn.noiseLevels, 1)} levels at mid grey): grid pattern ${pct(sn.inFile)} in the file written for this destination, ${pct(sn.posted)} after its re-save (the original photo: ${pct(sn.original)}).${sn.posted < 0.02 && sn.original >= 0.02 ? ' This re-save erases any camera’s grid, the original’s too; it stays in a Master copy.' : ''}`
+          ? `Sensor bake (${sn.layout}, ${sn.method === 'bilinear' ? 'bilinear' : 'Malvar–He–Cutler'} fill-in, ${sn.noiseLevels > 0 ? `photon noise ${fmt(sn.noiseLevels, 1)} levels at mid grey` : 'nothing added'}): grid pattern ${pct(sn.inFile)} in the file written for this destination, ${pct(sn.posted)} after its re-save (the original photo: ${pct(sn.original)}).${sn.posted < 0.02 && sn.original >= 0.02 ? ' This re-save erases any camera’s grid, the original’s too; it stays in a Master copy.' : ''}`
           : `Sensor bake is off. Grid pattern in your file ${pct(sn.inFile)}, after the re-save ${pct(sn.posted)} (the original photo: ${pct(sn.original)}).`,
       ),
     );
@@ -886,7 +886,7 @@ export class App {
       });
       box.appendChild(el('div', { class: 'row', title: 'How much of the camera’s sharpening to keep at strong edges, where it shows as an outline. Texture always keeps it, since there it reads as detail. 0 removes it all at edges (cleanest outlines)' }, el('span', {}, 'Keep at edges'), kc, kv));
     }
-    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges' || f.kind === 'fringes') {
+    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges' || f.kind === 'fringes' || f.kind === 'tone' || f.kind === 'glow' || f.kind === 'texture') {
       const am = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.amount * 100)) }) as HTMLInputElement;
       const av = el('span', { class: 'val' }, `${Math.round(f.details.amount * 100)} %`);
       am.addEventListener('input', () => (av.textContent = `${am.value} %`));
@@ -894,7 +894,7 @@ export class App {
         f.details.amount = Number(am.value) / 100;
         void this.rebuildFrom(f);
       });
-      box.appendChild(el('div', { class: 'row' }, el('span', {}, f.kind === 'detail' || f.kind === 'edges' ? 'Amount' : f.kind === 'banding' ? 'Smooth' : 'Remove'), am, av));
+      box.appendChild(el('div', { class: 'row' }, el('span', {}, f.kind === 'detail' || f.kind === 'edges' || f.kind === 'tone' || f.kind === 'texture' ? 'Amount' : f.kind === 'banding' ? 'Smooth' : 'Remove'), am, av));
     }
     if (f.kind === 'grain') {
       const am = el('input', { type: 'range', min: '5', max: '60', value: String(Math.round(f.details.targetLevels * 10)) }) as HTMLInputElement;
@@ -1053,6 +1053,19 @@ export class App {
         return `${fmt(d.measured[i] - d.reference[i], 1)} dB`;
       };
       fact('fine detail vs reference', `${at(0.12)} · ${at(0.2)} · ${at(0.3)} (at 8, 5, 3 px)`);
+    } else if (f.kind === 'texture') {
+      fact('fine texture now', `${fmt(f.details.share * 100, 0)} % of a natural scene's`);
+      fact('clearly short in', `${fmt(f.details.weakFraction * 100, 0)} % of the photo`);
+      fact('expected after the fix', `${fmt(f.details.expectedShare * 100, 0)} %`);
+    } else if (f.kind === 'glow') {
+      fact('glow beside edges', `${fmt(f.details.glowLevels, 1)} levels`);
+      fact('edges with a glow', `${f.details.sides} (${fmt(f.details.share * 100, 0)} % of smooth edge sides)`);
+      fact('area touched', `${fmt(f.details.coverage * 100, 1)} % of the photo`);
+    } else if (f.kind === 'tone') {
+      fact('darkest shadows', `${fmt(f.details.shadowLevels, 0)} levels`);
+      fact('brightest highlights', `${fmt(f.details.highlightLevels, 0)} levels`);
+      fact('local contrast now', `${fmt(f.details.localContrast, 1)} levels`);
+      fact('expected after the fix', `×${fmt(1 + (f.details.expectedRatio - 1) * f.details.amount, 2)}`);
     } else if (f.kind === 'fringes') {
       fact('on fine detail', `${fmt(f.details.detailLevels, 2)} levels`);
       fact('in smooth areas', `${fmt(f.details.flatLevels, 2)} levels`);
@@ -1253,8 +1266,9 @@ export class App {
     const layout = this.analysis ? (this.analysis.cfa.detected ? `the photo's own sensor grid (green found; ${['RGGB', 'GRBG', 'GBRG', 'BGGR'][this.analysis.cfa.redY * 2 + this.analysis.cfa.redX]} layout)` : 'a standard RGGB sensor grid (the photo shows no grid of its own)') : 'the photo’s sensor grid';
     const bakeSel = el('select') as HTMLSelectElement;
     for (const [v, label] of [
-      ['sharp', 'Sharp: Malvar–He–Cutler, subtle sensor noise'],
-      ['match', 'Match the original’s grid: may be softer and grainier'],
+      ['clean', 'Clean: re-sampled and filled in again, nothing added'],
+      ['sharp', 'With subtle sensor noise (a clearer sensor grid)'],
+      ['match', 'Match the original’s grid: softer and grainier'],
       ['off', 'Off'],
     ] as [BakeSetting, string][]) {
       const o = el('option', { value: v }, label) as HTMLOptionElement;

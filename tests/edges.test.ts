@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { correctionGainDb, fitCameraModel, measureEdgeProfile } from '../src/dsp/edges';
+import { correctionGainDb, detailMask, fitCameraModel, measureEdgeProfile, outlineClampDelta } from '../src/dsp/edges';
 import { makePlane, type Plane } from '../src/dsp/plane';
 import { bandGains, detailDelta } from '../src/dsp/spectrum';
 import { gaussian, rng } from '../src/synth/generate';
@@ -79,7 +79,10 @@ describe('camera blur and sharpening from edges', () => {
     const f = Float32Array.from({ length: 128 }, (_, i) => (i + 1) / 256);
     const gains = bandGains(f, correctionGainDb(m, 1.6, f, 0.004), 1);
     const d = detailDelta(cam, gains);
-    const fixed: Plane = { w, h, data: cam.data.map((v, i) => v + d.data[i]) };
+    // as the fix runs: the linear step, then the outline clamp beside flat areas
+    const lin: Plane = { w, h, data: cam.data.map((v, i) => v + d.data[i]) };
+    const c = outlineClampDelta(lin, 1);
+    const fixed: Plane = { w, h, data: lin.data.map((v, i) => v + c.data[i]) };
     const after = measureEdgeProfile(fixed)!;
     // outlines mostly gone, edge no wider than before
     expect(after.overshoot).toBeLessThan(prof.overshoot * 0.4);
@@ -103,5 +106,44 @@ describe('camera blur and sharpening from edges', () => {
     console.log('soft before', prof.widthPx.toFixed(2), 'after', after.widthPx.toFixed(2), after.overshoot.toFixed(3));
     expect(after.widthPx).toBeLessThan(prof.widthPx * 0.9);
     expect(after.overshoot).toBeLessThan(0.06);
+  });
+});
+
+describe('where sharpening may raise fine detail', () => {
+  it('leaves noise on a flat area alone and acts on texture', () => {
+    const w = 256;
+    const h = 128;
+    const g = gaussian(rng(7));
+    // left half: flat grey with strong, slightly softened noise (a phone sky);
+    // right half: texture with 1/f-like structure (sums of blobs at several sizes)
+    const noise = makePlane(w, h);
+    for (let i = 0; i < w * h; i++) noise.data[i] = 0.05 * g();
+    const soft = gaussBlur(noise, 0.6);
+    const tex = makePlane(w, h);
+    for (const s of [1, 2, 4, 8]) {
+      const n = makePlane(w, h);
+      for (let i = 0; i < w * h; i++) n.data[i] = g();
+      const b = gaussBlur(n, s);
+      for (let i = 0; i < w * h; i++) tex.data[i] += 0.06 * s * b.data[i];
+    }
+    const Y = makePlane(w, h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        Y.data[i] = 0.5 + (x < w / 2 ? soft.data[i] : tex.data[i]);
+      }
+    const m = detailMask(Y);
+    let left = 0;
+    let right = 0;
+    let n = 0;
+    for (let y = 20; y < h - 20; y++)
+      for (let x = 20; x < w / 2 - 20; x++) {
+        left += m[y * w + x];
+        right += m[y * w + x + w / 2];
+        n++;
+      }
+    // softened noise still leaks a little through; most of it is left alone
+    expect(left / n).toBeLessThan(0.2);
+    expect(right / n).toBeGreaterThan(0.6);
   });
 });

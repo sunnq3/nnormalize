@@ -37,6 +37,12 @@ export function plainLabel(f: Finding): string {
       return f.details.mode === 'sharp' ? 'Oversharpened' : 'Too smooth (fine detail missing)';
     case 'banding':
       return 'Banding in smooth areas';
+    case 'texture':
+      return 'Smeared fine texture';
+    case 'glow':
+      return 'Glow around subjects';
+    case 'tone':
+      return 'Flat, low contrast';
     case 'fringes':
       return 'False colour on fine detail';
     case 'edges':
@@ -83,6 +89,19 @@ export function plainDescription(f: Finding): string {
       if (d.mode === 'sharp') return `fine detail is ${fmt(10 ** (d.excessDb / 20), 1)}× stronger than a camera photo of this scene would have: outlines and crunchy texture from sharpening; this fix tones it down`;
       return `fine detail is at ${fmt(100 * 10 ** (-d.deficitDb / 20), 0)} % of what a camera photo of this scene would have: smoothed, denoised or upscaled; this fix brings it back by up to ${fmt(10 ** (d.maxBoostDb / 20), 1)}×`;
     }
+    case 'texture': {
+      const d = f.details;
+      return `fine texture (hair, fabric, foliage, skin) is at ${fmt(d.share * 100, 0)} % of what a scene like this carries, clearly short in ${fmt(d.weakFraction * 100, 0)} % of the photo: noise reduction smeared it. This fix strengthens the texture that is still there; nothing is added`;
+    }
+    case 'glow': {
+      const d = f.details;
+      return `a soft ${fmt(d.glowLevels, 1)}-level glow hugs ${fmt(d.share * 100, 0)} % of the smooth edges (sky, walls next to subjects): the cut-out, pasted-on look phones' exposure blending leaves. This fix flattens it back onto the area around it`;
+    }
+    case 'tone': {
+      const d = f.details;
+      const sh = d.shadowLevels >= 8 ? `the darkest shadows only reach ${fmt(d.shadowLevels, 0)} levels (lifted; a camera's go down to about 0–4)` : 'the shadows reach black';
+      return `${sh}; contrast between neighbouring areas is ${fmt(d.localContrast, 1)} levels. This fix brings back depth, about ${fmt((d.expectedRatio - 1) * 100 * d.amount, 0)} % more local contrast${d.shadowLevels >= 8 ? ', and deeper shadows' : ''}`;
+    }
     case 'fringes': {
       const d = f.details;
       return `colour speckles and fringes on fine detail that don't follow its brightness (left by the camera filling in colours): ${fmt(d.detailLevels, 1)} levels there, against ${fmt(d.flatLevels, 1)} in smooth areas`;
@@ -127,7 +146,7 @@ export function plainFix(f: Finding): string {
     case 'noise':
       return f.details.reduction > 0
         ? 'Grain is reduced everywhere with an edge-preserving smoother, by the amount you set.'
-        : 'Grain is levelled: reduced where it is heavier than the rest of the photo, matched grain added where an earlier tool scrubbed it.';
+        : 'Grain is levelled: brought down where it is heavier than the rest of the photo. Cleaner areas are left as they are; nothing is added.';
     case 'hotpixels':
       return 'Each pixel is replaced by the median of its eight neighbours.';
     case 'chroma':
@@ -138,6 +157,12 @@ export function plainFix(f: Finding): string {
       return f.details.mode === 'sharp'
         ? 'The detail bands that sharpening pushed up are brought back down to where a camera photo of this scene would sit. Coarse shapes and colour are untouched.'
         : 'The fine detail bands are raised toward where a camera photo of this scene would sit, judged against the photo’s own coarser detail. Only brightness detail changes; nothing past what a re-save keeps is boosted.';
+    case 'texture':
+      return 'Real scenes carry about as much detail at each scale as at the next coarser one. Where a textured area has much less fine detail than its coarser detail predicts, the fine detail already there is strengthened toward that share (at most ×2.5). Smooth areas, big edges and noise are left as they are, and no noise or pattern is added.';
+    case 'glow':
+      return 'Along each strong edge the profile across it is read out to 48 px. Where a side is smooth, its real level and gradient are fitted from further out, and the band near the edge that bulges away from it (exaggerating the edge, fading with distance) is set back onto that fit. Sides with texture or other edges are left alone.';
+    case 'tone':
+      return 'Phones blend a dark and a bright shot and lift the shadows, which packs everything into the middle. A local Laplacian filter expands the differences between neighbouring areas at every scale while leaving real edges at their height, so depth returns without halos; lifted shadows are brought back down with a soft toe. Brightness only; colours are kept.';
     case 'fringes':
       return 'On fine detail only, each pixel’s colour is pulled onto what its brightness predicts within a 5 × 5 neighbourhood: colour that follows brightness (a red letter on white) stays, colour that does not (speckles, zippers, fringes) goes. Brightness is untouched.';
     case 'edges':
@@ -151,7 +176,7 @@ export function plainFix(f: Finding): string {
 
 export const LEVEL_WORDS: Record<string, { label: string; hint: string }> = {
   gentle: { label: 'Gentle', hint: 'Only what is clearly wrong. Grain and faint patterns are left alone.' },
-  standard: { label: 'Standard', hint: 'Fix patterns, block edges and dead pixels; level the grain without removing it.' },
+  standard: { label: 'Standard', hint: 'Fix patterns, block edges, dead pixels, outlines, glow and flat contrast; bring down patches of heavier grain.' },
   strong: { label: 'Strong', hint: 'Everything above, plus faint patterns, firmer deblocking, and half the grain removed everywhere.' },
   maximum: { label: 'Maximum', hint: 'As far as it goes: 80 % of the grain removed, the heaviest deblocking. Expect a smoother look.' },
 };

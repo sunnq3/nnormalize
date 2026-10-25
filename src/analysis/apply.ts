@@ -9,12 +9,15 @@ import { deblockDelta } from '../dsp/blocks';
 import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr } from '../dsp/chroma';
 import { grainDelta } from '../dsp/grain';
 import { debandDelta } from '../dsp/banding';
-import { correctionGainDb, edgeZone, outlineClampDelta } from '../dsp/edges';
+import { correctionGainDb, detailMask, edgeZone, outlineClampDelta } from '../dsp/edges';
 import { falseColourDelta } from '../dsp/cfa';
+import { toneDelta, toneParams } from '../dsp/tone';
+import { glowFix } from '../dsp/glow';
+import { textureDelta } from '../dsp/texture';
 import { bandGains, detailBalance, detailDelta, radialProfile, wantedGainDb } from '../dsp/spectrum';
 import { parametricDeltaGlobal, parametricDeltaTiled, spectralDelta, type SpectralTarget } from '../dsp/filter';
 import { median9 } from '../dsp/hotpixels';
-import { denoiseDelta, noiseMap, noiseModel, regrainDelta } from '../dsp/noise';
+import { denoiseDelta, noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
 import { makePlane, type Plane } from '../dsp/plane';
 import type { TileGrid } from '../dsp/tiles';
@@ -94,6 +97,35 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
     progress(1);
     return [delta, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }];
   }
+  if (finding.kind === 'texture') {
+    const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);
+    const dT = textureDelta(Y, finding.details.amount);
+    progress(0.8);
+    const Y2 = { w: Y.w, h: Y.h, data: Y.data.map((v, i) => v + dT.data[i]) };
+    const rgb = toRGB(Y2, Cb, Cr);
+    progress(1);
+    return rgb.map((p, c) => ({ w: p.w, h: p.h, data: p.data.map((v, i) => v - planes[c].data[i]) })) as [Plane, Plane, Plane];
+  }
+  if (finding.kind === 'glow') {
+    const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);
+    const g = glowFix(Y, finding.details.amount);
+    progress(0.8);
+    const Y2 = { w: Y.w, h: Y.h, data: Y.data.map((v, i) => v + g.delta.data[i]) };
+    const rgb = toRGB(Y2, Cb, Cr);
+    progress(1);
+    return rgb.map((p, c) => ({ w: p.w, h: p.h, data: p.data.map((v, i) => v - planes[c].data[i]) })) as [Plane, Plane, Plane];
+  }
+  if (finding.kind === 'tone') {
+    // brightness only, colour kept as it is
+    const d = finding.details;
+    const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);
+    const dY = toneDelta(Y, toneParams(d.level, d.amount, d.noise), d.shadowLevels);
+    progress(0.8);
+    const Y2 = { w: Y.w, h: Y.h, data: Y.data.map((v, i) => v + dY.data[i]) };
+    const rgb = toRGB(Y2, Cb, Cr);
+    progress(1);
+    return rgb.map((p, c) => ({ w: p.w, h: p.h, data: p.data.map((v, i) => v - planes[c].data[i]) })) as [Plane, Plane, Plane];
+  }
   if (finding.kind === 'fringes') {
     const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);
     const { dCb, dCr } = falseColourDelta(Y, Cb, Cr, finding.details.amount);
@@ -114,10 +146,32 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
     // in texture: only the wide sharpening goes and the blur is reduced, the fine crispness stays
     const atEdges = detailDelta(Y, bandGains(f, correctionGainDb(model, d.targetWidthPx, f, d.grainSigma, d.keepCrisp ?? 0.5), d.amount));
     progress(0.3);
-    const inTexture = detailDelta(Y, bandGains(f, correctionGainDb(model, d.targetWidthPx, f, d.grainSigma, 1), d.amount));
+    const texGain = correctionGainDb(model, d.targetWidthPx, f, d.grainSigma, 1);
+    const inTexture = detailDelta(Y, bandGains(f, texGain, d.amount));
+    // in flat areas only what lowers a frequency (undoing the camera's wide
+    // sharpening): raising fine frequencies there would only raise the noise
+    const inFlat = detailDelta(Y, bandGains(f, texGain.map((v) => Math.min(0, v)), d.amount));
     const zone = edgeZone(Y);
+    const detail = detailMask(Y, d.grainSigma);
     const delta = makePlane(Y.w, Y.h);
-    for (let i = 0; i < delta.data.length; i++) delta.data[i] = inTexture.data[i] + zone[i] * (atEdges.data[i] - inTexture.data[i]);
+    for (let i = 0; i < delta.data.length; i++) {
+      const base = inFlat.data[i] + detail[i] * (inTexture.data[i] - inFlat.data[i]);
+      delta.data[i] = base + zone[i] * (atEdges.data[i] - base);
+    }
+    // a sharpening threshold: what the boost adds is kept where it is large
+    // (real edges and texture) and faded where it is the size of noise, so
+    // the noise beside edges is not raised and a re-save has less to ring on
+    {
+      const sample: number[] = [];
+      for (let i = 0; i < delta.data.length; i += 3) if (detail[i] > 0.5 || zone[i] > 0.5) sample.push(Math.abs(delta.data[i] - inFlat.data[i]));
+      sample.sort((a, b) => a - b);
+      const T = sample.length ? 1.4826 * sample[sample.length >> 1] : 0;
+      if (T > 0)
+        for (let i = 0; i < delta.data.length; i++) {
+          const b = delta.data[i] - inFlat.data[i];
+          delta.data[i] = inFlat.data[i] + (b * b * b) / (b * b + T * T);
+        }
+    }
     progress(0.5);
     // then the lopsided outlines the linear step cannot reach, beside flat areas only
     const lin = { w: Y.w, h: Y.h, data: Y.data.map((v, i) => v + delta.data[i]) };
@@ -175,11 +229,9 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
         const model = noiseModel(map);
         const reduction = Math.min(0.95, Math.max(0, finding.details.reduction ?? 0));
         const thr = Math.max(1.5, finding.details.thresholdDb / 2);
+        // grainier patches are brought down; cleaner ones are left clean
+        // (no synthetic grain is ever added: it reads as an overlay)
         const dn = denoiseDelta(ch, map, model, { thresholdDb: reduction > 0 ? 0 : thr, targetScale: 1 - reduction });
-        if (reduction === 0) {
-          const rg = regrainDelta(ch, map, model, { thresholdDb: thr, seed: 0x5eed + ci });
-          addInto(dn.delta, rg.delta);
-        }
         out.push(dn.delta);
         sub(1);
         break;
