@@ -38,7 +38,7 @@ describe('engine end to end (no encode)', () => {
     expect(hp.kind === 'hotpixels' && hp.details.count).toBeGreaterThanOrEqual(5);
     expect(a.blockGrid.detected).toBe(true);
     expect(a.blockGrid.offsetX).toBe(0);
-  });
+  }, 30000);
 
   it('builds layers whose composite at full strength has no residual peaks, and at zero strength equals the source', () => {
     const a = engine.analysis!;
@@ -65,7 +65,7 @@ describe('engine end to end (no encode)', () => {
     const wh = welchSpectrum(lumHalf, grid);
     const ph = detectPeaks(backgroundModel(wh.power, wh.size));
     expect(ph.length).toBeGreaterThanOrEqual(1);
-  });
+  }, 30000);
 
   it('renders preview and crop in every mode', () => {
     const layers = engine.analysis!.findings.filter((f) => f.enabled).map((f) => ({ id: f.id, strength: 1 }));

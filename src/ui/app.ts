@@ -793,7 +793,7 @@ export class App {
       box.appendChild(el('div', { class: 'empty' }, 'Nothing stands out at this clean-up level. Raise it to also smooth grain and block edges.'));
       return;
     }
-    const faint = (f: Finding): boolean => f.kind === 'periodic' && !f.enabled && Math.max(f.details.amplitude, f.details.amplitudeP90) * 255 < 1;
+    const faint = (f: Finding): boolean => (f.kind === 'periodic' && !f.enabled && Math.max(f.details.amplitude, f.details.amplitudeP90) * 255 < 1) || (f.kind === 'drift' && !f.enabled && Math.max(f.details.amplitude, f.details.amplitudeP90) < 1);
     const main = this.analysis.findings.filter((f) => !faint(f) || f.id === this.selected);
     const rest = this.analysis.findings.filter((f) => !main.includes(f));
     const renderRow = (f: Finding): HTMLElement => {
@@ -886,7 +886,7 @@ export class App {
       });
       box.appendChild(el('div', { class: 'row', title: 'How much of the camera’s sharpening to keep at strong edges, where it shows as an outline. Texture always keeps it, since there it reads as detail. 0 removes it all at edges (cleanest outlines)' }, el('span', {}, 'Keep at edges'), kc, kv));
     }
-    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges' || f.kind === 'fringes' || f.kind === 'tone' || f.kind === 'glow' || f.kind === 'texture') {
+    if (f.kind === 'chroma' || f.kind === 'ringing' || f.kind === 'detail' || f.kind === 'banding' || f.kind === 'edges' || f.kind === 'fringes' || f.kind === 'tone' || f.kind === 'glow' || f.kind === 'texture' || f.kind === 'drift') {
       const am = el('input', { type: 'range', min: '0', max: '100', value: String(Math.round(f.details.amount * 100)) }) as HTMLInputElement;
       const av = el('span', { class: 'val' }, `${Math.round(f.details.amount * 100)} %`);
       am.addEventListener('input', () => (av.textContent = `${am.value} %`));
@@ -981,7 +981,7 @@ export class App {
     tools.appendChild(el('button', { onclick: () => void this.maskFill(255) }, 'Everywhere'));
     tools.appendChild(el('button', { onclick: () => void this.maskFill(0) }, 'Nowhere'));
     tools.appendChild(el('button', { onclick: () => void this.maskInvert() }, 'Swap'));
-    if (f.kind === 'periodic') tools.appendChild(el('button', { onclick: () => void this.maskFromAnalysis() }, 'Only where it was found'));
+    if (f.kind === 'periodic' || f.kind === 'drift') tools.appendChild(el('button', { onclick: () => void this.maskFromAnalysis() }, 'Only where it was found'));
     where.appendChild(tools);
     const size = el('input', { type: 'range', min: '4', max: '800', value: String(this.viewer.brush.size) }) as HTMLInputElement;
     const sizeVal = el('span', { class: 'val' }, `${this.viewer.brush.size} px`);
@@ -1057,6 +1057,13 @@ export class App {
       fact('fine texture now', `${fmt(f.details.share * 100, 0)} % of a natural scene's`);
       fact('clearly short in', `${fmt(f.details.weakFraction * 100, 0)} % of the photo`);
       fact('expected after the fix', `${fmt(f.details.expectedShare * 100, 0)} %`);
+    } else if (f.kind === 'drift') {
+      const d = f.details;
+      fact('spacing', d.periodMax - d.periodMin > 0.15 * d.period ? `${fmt(d.periodMin, 2)} to ${fmt(d.periodMax, 2)} px (drifts)` : `${fmt(d.period, 2)} px`);
+      fact('direction', d.angleSpread > 2 ? `${fmt(d.angleDeg, 1)}°, turning by ± ${fmt(d.angleSpread, 1)}°` : `${fmt(d.angleDeg, 1)}°`);
+      fact('strength', `${fmt(d.amplitude, 2)} levels typical, ${fmt(d.amplitudeP90, 2)} at its strongest`);
+      fact('above the background by', `${fmt(d.excessDb, 1)} dB`);
+      fact('tracked through', `${d.nodes.length} of ${Math.max(1, d.gridW - 2) * Math.max(1, d.gridH - 2)} windows (${fmt(d.coverage * 100, 0)} %)`);
     } else if (f.kind === 'glow') {
       fact('glow beside edges', `${fmt(f.details.glowLevels, 1)} levels`);
       fact('edges with a glow', `${f.details.sides} (${fmt(f.details.share * 100, 0)} % of smooth edge sides)`);

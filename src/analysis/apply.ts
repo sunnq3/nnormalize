@@ -10,6 +10,7 @@ import { chromaDelta, haloBand, measureChromaNoise, ringingDelta, toRGB, toYCbCr
 import { grainDelta } from '../dsp/grain';
 import { debandDelta } from '../dsp/banding';
 import { correctionGainDb, detailMask, edgeZone, outlineClampDelta } from '../dsp/edges';
+import { driftDelta, type DriftTrack } from '../dsp/drift';
 import { falseColourDelta } from '../dsp/cfa';
 import { toneDelta, toneParams } from '../dsp/tone';
 import { glowFix } from '../dsp/glow';
@@ -96,6 +97,14 @@ export function computeDelta(planes: [Plane, Plane, Plane], analysis: Analysis, 
     const delta = detailDelta(Y, gains);
     progress(1);
     return [delta, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }, { w: delta.w, h: delta.h, data: new Float32Array(delta.data) }];
+  }
+  if (finding.kind === 'drift') {
+    // every channel, so coloured moiré goes with the brightness stripes
+    const d = finding.details;
+    const track: DriftTrack = { nodes: d.nodes, gridW: d.gridW, gridH: d.gridH, period: d.period, periodMin: d.periodMin, periodMax: d.periodMax, angleDeg: d.angleDeg, angleSpread: d.angleSpread, amplitude: d.amplitude / 255, amplitudeP90: d.amplitudeP90 / 255, excessDb: d.excessDb, coverage: d.coverage, stationary: d.stationary };
+    const deltas = driftDelta([planes[0], planes[1], planes[2]], track, progress);
+    if (d.amount !== 1) for (const p of deltas) for (let i = 0; i < p.data.length; i++) p.data[i] *= d.amount;
+    return deltas as [Plane, Plane, Plane];
   }
   if (finding.kind === 'texture') {
     const [Y, Cb, Cr] = toYCbCr(planes[0], planes[1], planes[2]);

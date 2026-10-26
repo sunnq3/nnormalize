@@ -3,10 +3,10 @@
  * here must survive structured cloning.
  */
 
-export type FindingKind = 'periodic' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges' | 'fringes' | 'tone' | 'glow' | 'texture';
+export type FindingKind = 'periodic' | 'drift' | 'jpeg-grid' | 'noise' | 'hotpixels' | 'chroma' | 'ringing' | 'grain' | 'detail' | 'banding' | 'edges' | 'fringes' | 'tone' | 'glow' | 'texture';
 
 export type PeriodicMethod = 'parametric' | 'parametric-tiled' | 'flatten' | 'notch';
-export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct' | 'fringe-fix' | 'local-laplacian' | 'glow-fix' | 'texture-restore';
+export type Method = PeriodicMethod | 'deblock' | 'normalise' | 'inpaint' | 'chroma-smooth' | 'halo-smooth' | 'regrain' | 'detail-balance' | 'deband' | 'edge-correct' | 'fringe-fix' | 'local-laplacian' | 'glow-fix' | 'texture-restore' | 'windowed-notch';
 
 export interface HarmonicInfo {
   order: number;
@@ -283,6 +283,32 @@ export interface ToneFinding extends FindingBase {
   details: ToneDetails;
 }
 
+/** A repeating pattern whose spacing and direction drift across the frame (screen moiré, scan beats). */
+export interface DriftDetails {
+  /** the tracked spike per 256-px window (half-overlapping grid of gridW × gridH) */
+  nodes: { gx: number; gy: number; u: number; v: number; amplitude: number; excessDb: number }[];
+  gridW: number;
+  gridH: number;
+  period: number; // px, median
+  periodMin: number;
+  periodMax: number;
+  angleDeg: number;
+  angleSpread: number;
+  amplitude: number; // levels, median over windows
+  amplitudeP90: number;
+  excessDb: number;
+  coverage: number; // fraction of windows
+  stationary: boolean;
+  category: 'screen-moire' | 'fine-grid' | 'drifting';
+  amount: number; // 0..1
+}
+
+export interface DriftFinding extends FindingBase {
+  kind: 'drift';
+  method: 'windowed-notch';
+  details: DriftDetails;
+}
+
 export interface GlowFinding extends FindingBase {
   kind: 'glow';
   method: 'glow-fix';
@@ -295,7 +321,7 @@ export interface TextureFinding extends FindingBase {
   details: TextureDetails;
 }
 
-export type Finding = TextureFinding | GlowFinding | ToneFinding | FringesFinding | EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
+export type Finding = DriftFinding | TextureFinding | GlowFinding | ToneFinding | FringesFinding | EdgesFinding | PeriodicFinding | JpegGridFinding | NoiseFinding | HotPixelFinding | ChromaFinding | RingingFinding | GrainFinding | DetailFinding | BandingFinding;
 
 export interface SpectrumView {
   size: number;

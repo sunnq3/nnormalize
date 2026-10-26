@@ -4,6 +4,7 @@
  * code so it can also be driven directly in tests.
  */
 
+import { DRIFT_HOP, DRIFT_N } from '../dsp/drift';
 import { analyze } from '../analysis/analyze';
 import { jpegYccToRgb, rgbToJpegYcc, settleBlocks } from '../dsp/jpegdomain';
 import { noiseMap } from '../dsp/noise';
@@ -24,7 +25,7 @@ import type { BakeSetting, Budget, LayerSetting, LayerStats, LiveReport, SensorR
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
 /** Order in which correction stages are applied; later stages are computed on earlier ones. */
-export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, 'jpeg-grid': 1, hotpixels: 2, detail: 4, edges: 4, ringing: 4.5, noise: 5, fringes: 5.5, glow: 6.3, texture: 6.6, tone: 7.5, chroma: 6, banding: 7, grain: 8 };
+export const STAGE_ORDER: Record<Finding['kind'], number> = { periodic: 0, drift: 0.5, 'jpeg-grid': 1, hotpixels: 2, detail: 4, edges: 4, ringing: 4.5, noise: 5, fringes: 5.5, glow: 6.3, texture: 6.6, tone: 7.5, chroma: 6, banding: 7, grain: 8 };
 
 /** Findings in the order their layers should be built. */
 export function stageSorted<T extends { kind: Finding['kind'] }>(findings: T[]): T[] {
@@ -284,6 +285,32 @@ export class Engine {
     const w = this.maskW;
     const h = this.maskH;
     const data = new Uint8Array(w * h);
+    if (finding.kind === 'drift') {
+      // the windows the pattern was tracked through; each pixel sits in four
+      // half-overlapping windows, so the share with a node feathers the edge
+      const d = finding.details;
+      const src = this.source!;
+      const has = new Uint8Array(d.gridW * d.gridH);
+      for (const n of d.nodes) has[n.gy * d.gridW + n.gx] = 1;
+      for (let y = 0; y < h; y++) {
+        const py = ((y + 0.5) / h) * src.h;
+        for (let x = 0; x < w; x++) {
+          const px = ((x + 0.5) / w) * src.w;
+          let found = 0;
+          let covering = 0;
+          for (let gy = Math.floor((py + DRIFT_N / 2 - DRIFT_N) / DRIFT_HOP) + 1; gy * DRIFT_HOP - DRIFT_N / 2 <= py; gy++) {
+            if (gy < 0 || gy >= d.gridH) continue;
+            for (let gx = Math.floor((px + DRIFT_N / 2 - DRIFT_N) / DRIFT_HOP) + 1; gx * DRIFT_HOP - DRIFT_N / 2 <= px; gx++) {
+              if (gx < 0 || gx >= d.gridW) continue;
+              covering++;
+              if (has[gy * d.gridW + gx]) found++;
+            }
+          }
+          data[y * w + x] = covering ? Math.round((255 * found) / covering) : 0;
+        }
+      }
+      return { w, h, data };
+    }
     if (finding.kind !== 'periodic') {
       data.fill(255);
       return { w, h, data };

@@ -21,6 +21,7 @@ import { measureEdgeProfile } from '../dsp/edges';
 import { measureFalseColour } from '../dsp/cfa';
 import { measureFlatness } from '../dsp/tone';
 import { glowFix } from '../dsp/glow';
+import { measureDrift, type DriftTrack } from '../dsp/drift';
 import { measureTexture } from '../dsp/texture';
 import { noiseMap, noiseModel } from '../dsp/noise';
 import { measurePattern } from '../dsp/pattern';
@@ -100,6 +101,40 @@ export function measureSurvival(
   for (const f of findings) {
     if (!f.enabled) continue;
     switch (f.kind) {
+      case 'drift': {
+        const d = f.details;
+        const track: DriftTrack = { nodes: d.nodes, gridW: d.gridW, gridH: d.gridH, period: d.period, periodMin: d.periodMin, periodMax: d.periodMax, angleDeg: d.angleDeg, angleSpread: d.angleSpread, amplitude: d.amplitude / 255, amplitudeP90: d.amplitudeP90 / 255, excessDb: d.excessDb, coverage: d.coverage, stationary: d.stationary };
+        const off = { x0: opts.crop?.x0 ?? 0, y0: opts.crop?.y0 ?? 0 };
+        const amp = (p: Plane): number => {
+          const m = measureDrift(p, track, off);
+          return m.count ? Math.max(m.amplitude, m.amplitudeP90) * 255 : 0;
+        };
+        const a0 = memo(`${f.id}:s`, () => amp(lumSf()));
+        const a1 = memo(`${f.id}:sd`, () => amp(lumSDf()));
+        const a2 = amp(lumRD);
+        const retained = a1 > 0.05 ? Math.max(0, Math.min(1, 1 - a2 / a1)) : 1;
+        const v = a2 < 1.0 ? 'survives' : verdictFor(retained);
+        fixes.push({
+          id: f.id,
+          kind: f.kind,
+          label: f.label,
+          unit: 'levels',
+          source: a0,
+          sourceOnDest: a1,
+          resultOnDest: a2,
+          retained,
+          verdict: v,
+          note:
+            v === 'survives'
+              ? a2 < 1.0 && retained < 0.8
+                ? `what remains (${a2.toFixed(1)} levels) is below what can be seen.`
+                : 'The stripes stay gone.'
+              : v === 'partly'
+                ? `part of the pattern shows again after the re-save (${a2.toFixed(1)} of ${a1.toFixed(1)} levels).`
+                : `the re-save brings the pattern back (${a2.toFixed(1)} of ${a1.toFixed(1)} levels).`,
+        });
+        break;
+      }
       case 'periodic': {
         const amp = (p: Plane): number => {
           const m = measurePattern(p, grid, f.details.u, f.details.v, { refine: false, searchGrid: grid, measureGrid: grid });

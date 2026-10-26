@@ -41,6 +41,8 @@ export function plainLabel(f: Finding): string {
       return 'Smeared fine texture';
     case 'glow':
       return 'Glow around subjects';
+    case 'drift':
+      return f.details.category === 'fine-grid' ? 'Fine screen grid' : f.details.category === 'screen-moire' ? 'Drifting stripes (screen moiré)' : 'Faint repeating pattern';
     case 'tone':
       return 'Flat, low contrast';
     case 'fringes':
@@ -92,6 +94,15 @@ export function plainDescription(f: Finding): string {
     case 'texture': {
       const d = f.details;
       return `fine texture (hair, fabric, foliage, skin) is at ${fmt(d.share * 100, 0)} % of what a scene like this carries, clearly short in ${fmt(d.weakFraction * 100, 0)} % of the photo: noise reduction smeared it. This fix strengthens the texture that is still there; nothing is added`;
+    }
+    case 'drift': {
+      const d = f.details;
+      const period = d.periodMax - d.periodMin > 0.15 * d.period ? `${fmt(d.periodMin, 1)}–${fmt(d.periodMax, 1)} px` : `${fmt(d.period, 1)} px`;
+      const angle = d.angleSpread > 2 ? `${fmt(d.angleDeg, 0)}° ± ${fmt(d.angleSpread, 0)}°` : `${fmt(d.angleDeg, 0)}°`;
+      const grid = d.category === 'fine-grid';
+      const what = grid ? 'a fine grid' : 'stripes';
+      const why = d.stationary ? 'too weak or too local for the whole-photo spectrum to catch' : `${grid ? 'its' : 'their'} spacing and direction drift across the frame, as a screen’s pixel grid does when photographed at an angle, so the whole-photo spectrum never sees ${grid ? 'it' : 'them'}`;
+      return `${what} ${period} apart at ${angle}, ${fmt(d.amplitude, 1)} levels on average and up to ${fmt(d.amplitudeP90, 1)}, over ${fmt(d.coverage * 100, 0)} % of the photo; ${why}. This fix removes exactly that pattern, window by window, and nothing else`;
     }
     case 'glow': {
       const d = f.details;
@@ -159,6 +170,8 @@ export function plainFix(f: Finding): string {
         : 'The fine detail bands are raised toward where a camera photo of this scene would sit, judged against the photo’s own coarser detail. Only brightness detail changes; nothing past what a re-save keeps is boosted.';
     case 'texture':
       return 'Real scenes carry about as much detail at each scale as at the next coarser one. Where a textured area has much less fine detail than its coarser detail predicts, the fine detail already there is strengthened toward that share (at most ×2.5). Smooth areas, big edges and noise are left as they are, and no noise or pattern is added.';
+    case 'drift':
+      return 'The photo is read in 256-px windows overlapping by half. In each window the pattern is a clean spike in the spectrum, so only the narrow band of frequencies around that spike is taken out, each bin by how far it stands above the window’s own background; the windows are then blended back. Everything outside that sliver of the spectrum is left exactly as it was: no blur, no smoothing. All three colour channels, so coloured moiré goes too.';
     case 'glow':
       return 'Along each strong edge the profile across it is read out to 48 px. Where a side is smooth, its real level and gradient are fitted from further out, and the band near the edge that bulges away from it (exaggerating the edge, fading with distance) is set back onto that fit. Sides with texture or other edges are left alone.';
     case 'tone':

@@ -7,6 +7,7 @@ import { bandingStrength, detectBanding } from '../dsp/banding';
 import { detectCfaPhase, measureFalseColour } from '../dsp/cfa';
 import { measureFlatness, toneDelta, toneParams } from '../dsp/tone';
 import { glowFix } from '../dsp/glow';
+import { describeDrift, driftDelta, findDriftingPatterns, type DriftTrack } from '../dsp/drift';
 import { measureTexture, textureDelta } from '../dsp/texture';
 import { fitCameraModel, measureEdgeProfile, reachableSigma, targetSigma } from '../dsp/edges';
 import { backgroundModel } from '../dsp/background';
@@ -39,6 +40,7 @@ import {
   type JpegGridFinding,
   type NoiseFinding,
   type PeriodicFinding,
+  type DriftFinding,
 } from './types';
 
 export interface AnalyzeInput {
@@ -209,6 +211,68 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
   findings.sort((a, b) => b.severity - a.severity);
   t = mark('peaks', t);
 
+  // --- patterns that drift across the frame ----------------------------------------
+  // A screen photographed at an angle, a scanned print, a fabric beating
+  // against the sensor: clean stripes in any small patch, but their spacing
+  // and direction change across the frame, so the averaged spectrum above
+  // never sees them. Found window by window instead.
+  progress('drift', 0);
+  const driftTracks: DriftTrack[] = [];
+  {
+    const tracks = findDriftingPatterns(luma, { minAmplitude: 0.5 * floor }, (fr) => progress('drift', fr));
+    let di = 0;
+    for (const tr of tracks) {
+      const near8 = (f: number): boolean => Math.abs(f * 8 - Math.round(f * 8)) * 32 < 0.5;
+      const um = tr.nodes[tr.nodes.length >> 1].u;
+      const vm = tr.nodes[tr.nodes.length >> 1].v;
+      // a fixed pattern on the 8-px grid of modest strength is compression damage, the deblocker's job
+      if (tr.stationary && near8(um) && near8(vm) && tr.excessDb < 25) continue;
+      // a fixed pattern the averaged spectrum already found is reported once, there
+      if (tr.stationary && findings.some((f) => f.kind === 'periodic' && Math.hypot((f.details.u - um) * 256, (f.details.v - vm) * 256) < 2)) continue;
+      const amp = tr.amplitude * 255;
+      const p90 = tr.amplitudeP90 * 255;
+      const seeable = Math.max(amp, p90) >= Math.max(1, opts.minAmplitudeLevels);
+      const visible = Math.max(amp, p90) >= opts.minAmplitudeLevels;
+      const enabled = (seeable && tr.excessDb >= 15) || (level.enableWeakPeaks && visible);
+      const category: DriftFinding['details']['category'] = tr.period < 3 ? 'fine-grid' : tr.stationary ? 'drifting' : 'screen-moire';
+      const d = describeDrift(tr);
+      const label = category === 'fine-grid' ? 'Fine screen grid' : category === 'screen-moire' ? 'Drifting stripes (screen moiré)' : 'Faint repeating pattern';
+      const df: DriftFinding = {
+        id: `drift-${di++}`,
+        kind: 'drift',
+        label,
+        description: `stripes ${d.period} apart at ${d.angle}, ${amp.toFixed(1)} levels (up to ${p90.toFixed(1)}), over ${(tr.coverage * 100).toFixed(0)} % of the photo${tr.stationary ? '' : '; spacing and direction drift across the frame'}`,
+        severity: Math.min(1, p90 / 8) * Math.min(1, tr.coverage / 0.3),
+        extent: tr.coverage,
+        enabled,
+        confidence: tr.excessDb >= 20 && tr.nodes.length >= 12 ? 'high' : tr.excessDb >= 15 ? 'medium' : 'low',
+        note: !visible ? `Only ${p90.toFixed(2)} levels at most: below the ${opts.minAmplitudeLevels} level floor, not visible. Left unticked.` : !seeable ? `Only ${Math.max(amp, p90).toFixed(2)} levels: real but too faint to see. Left unticked; tick it if you want it gone anyway.` : !enabled ? 'Weak; could be real texture. Left unticked.' : '',
+        strength: 1,
+        method: 'windowed-notch',
+        details: {
+          nodes: tr.nodes,
+          gridW: tr.gridW,
+          gridH: tr.gridH,
+          period: tr.period,
+          periodMin: tr.periodMin,
+          periodMax: tr.periodMax,
+          angleDeg: tr.angleDeg,
+          angleSpread: tr.angleSpread,
+          amplitude: amp,
+          amplitudeP90: p90,
+          excessDb: tr.excessDb,
+          coverage: tr.coverage,
+          stationary: tr.stationary,
+          category,
+          amount: 1,
+        },
+      };
+      findings.push(df);
+      if (enabled) driftTracks.push(tr);
+    }
+  }
+  t = mark('drift', t);
+
   // --- pattern-free luma --------------------------------------------------------
   // Everything after this point (block grid, noise, hot pixels) is measured on
   // the luma with the strong periodic patterns subtracted, otherwise a moiré's
@@ -223,6 +287,10 @@ export function analyze(input: AnalyzeInput, optsIn: Partial<AnalysisOptions> = 
       const d = stationary || quick ? parametricDeltaGlobal(w, h, o.u, o.v, m.amplitude, m.phase) : parametricDeltaTiled(w, h, grid, m);
       for (let i = 0; i < cleanLuma.data.length; i++) cleanLuma.data[i] += d.data[i];
     }
+  }
+  if (driftTracks.length) {
+    const d = driftDelta([cleanLuma], driftTracks)[0];
+    for (let i = 0; i < cleanLuma.data.length; i++) cleanLuma.data[i] += d.data[i];
   }
   t = mark('cleanLuma', t);
 
