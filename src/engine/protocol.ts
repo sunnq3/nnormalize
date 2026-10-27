@@ -6,6 +6,7 @@
 
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
 import type { JpegExportOptions } from '../io/encode';
+import type { SignatureStatus } from './signature';
 import type { SurvivalReport } from '../analysis/survival';
 import type { ProfileId } from './profiles';
 import type { SourceMeta } from '../io/decode';
@@ -84,8 +85,26 @@ export interface RoundTripReport {
 /** The sensor bake at the end: off, sharp (Malvar–He–Cutler, subtle noise), or matching the original's grid. */
 export type BakeSetting = 'off' | 'clean' | 'sharp' | 'match';
 
+/** The sensor's own signature (PRNU) in the untouched photo, the result, the file and the posted copy: correlation with the learned map. */
+export interface SignatureReport {
+  photos: number;
+  reliability: number;
+  /** correlation of each copy's noise with the map (0 = none; a photo from this camera reads well above its noise, z ≫ 5) */
+  original: number;
+  result: number;
+  inFile: number;
+  posted: number;
+  /** z-scores of the same */
+  zOriginal: number;
+  zPosted: number;
+  /** the gain the map was applied at (0 = not applied) */
+  gain: number;
+  restored: boolean;
+}
+
 /** The sensor bake: whether it ran, the grid used, and how clearly the 2×2 sensor pattern shows (0…1). */
 export interface SensorReport {
+  signature?: SignatureReport;
   baked: boolean;
   /** sensor noise added at the photosites, as its strength at mid grey in levels */
   noiseLevels: number;
@@ -148,9 +167,16 @@ export type Request =
       budget: Budget;
       analysisOptions: Partial<AnalysisOptions>;
       bake: BakeSetting;
+      /** put the sensor's own learned signature back */
+      signature: boolean;
     }
   | { type: 'verifyResult'; id: number; layers: LayerSetting[]; master: number; analysisOptions: Partial<AnalysisOptions> }
-  | { type: 'liveCheck'; id: number; layers: LayerSetting[]; findings: Finding[]; master: number; profile: ProfileId; options: JpegExportOptions; bake: BakeSetting }
+  | { type: 'liveCheck'; id: number; layers: LayerSetting[]; findings: Finding[]; master: number; profile: ProfileId; options: JpegExportOptions; bake: BakeSetting; signature: boolean }
+  | { type: 'signatureLearn'; id: number; file: Blob }
+  | { type: 'signatureStatus'; id: number }
+  | { type: 'signatureExport'; id: number }
+  | { type: 'signatureImport'; id: number; bytes: Uint8Array }
+  | { type: 'signatureForget'; id: number }
   | { type: 'presenceMask'; id: number; findingId: string }
   | { type: 'addPeak'; id: number; u: number; v: number }
   | { type: 'luminosityMask'; id: number; findingId: string; lo: number; hi: number; soft: number };
@@ -167,4 +193,6 @@ export type Response =
   | { type: 'live'; id: number; report: LiveReport }
   | { type: 'mask'; id: number; w: number; h: number; data: Uint8Array }
   | { type: 'finding'; id: number; finding: Finding }
+  | { type: 'signature'; id: number; status: SignatureStatus; learned?: { accepted: boolean; reason: string; usable: number; key: string | null } }
+  | { type: 'bytes'; id: number; bytes: Uint8Array | null }
   | { type: 'error'; id: number; message: string };

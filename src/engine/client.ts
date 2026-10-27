@@ -7,6 +7,7 @@ import { createEngineWorker } from './workerFactory';
 import type { ProfileId } from './profiles';
 import type { JpegExportOptions } from '../io/encode';
 import type { BakeSetting, Budget, LayerSetting, LayerStats, LiveReport, LoadedInfo, RenderRequest, RenderResult, Request, Response, RoundTripReport, SynthRequest } from './protocol';
+import type { SignatureStatus } from './signature';
 
 type RequestBody = Request extends infer R ? (R extends { id: number } ? Omit<R, 'id'> : never) : never;
 
@@ -107,16 +108,47 @@ export class EngineClient {
     analysisOptions: Partial<AnalysisOptions>,
     onProgress?: (stage: string, fraction: number) => void,
     bake: BakeSetting = 'clean',
+    signature = false,
   ): Promise<{ jpeg: Uint8Array; report: RoundTripReport }> {
-    const r = await this.send({ type: 'export', layers, findings, master, profile, options, budget, analysisOptions, bake }, onProgress);
+    const r = await this.send({ type: 'export', layers, findings, master, profile, options, budget, analysisOptions, bake, signature }, onProgress);
     if (r.type !== 'export') throw new Error('unexpected reply');
     return { jpeg: r.jpeg, report: r.report };
   }
 
-  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profile: ProfileId, options: JpegExportOptions, bake: BakeSetting = 'clean'): Promise<LiveReport> {
-    const r = await this.send({ type: 'liveCheck', layers, findings, master, profile, options, bake });
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profile: ProfileId, options: JpegExportOptions, bake: BakeSetting = 'clean', signature = false): Promise<LiveReport> {
+    const r = await this.send({ type: 'liveCheck', layers, findings, master, profile, options, bake, signature });
     if (r.type !== 'live') throw new Error('unexpected reply');
     return r.report;
+  }
+
+  async signatureLearn(file: File): Promise<{ status: SignatureStatus; learned: { accepted: boolean; reason: string; usable: number; key: string | null } }> {
+    const r = await this.send({ type: 'signatureLearn', file });
+    if (r.type !== 'signature' || !r.learned) throw new Error('unexpected reply');
+    return { status: r.status, learned: r.learned };
+  }
+
+  async signatureStatus(): Promise<SignatureStatus> {
+    const r = await this.send({ type: 'signatureStatus' });
+    if (r.type !== 'signature') throw new Error('unexpected reply');
+    return r.status;
+  }
+
+  async signatureExport(): Promise<Uint8Array | null> {
+    const r = await this.send({ type: 'signatureExport' });
+    if (r.type !== 'bytes') throw new Error('unexpected reply');
+    return r.bytes;
+  }
+
+  async signatureImport(bytes: Uint8Array): Promise<SignatureStatus> {
+    const r = await this.send({ type: 'signatureImport', bytes }, undefined, [bytes.buffer]);
+    if (r.type !== 'signature') throw new Error('unexpected reply');
+    return r.status;
+  }
+
+  async signatureForget(): Promise<SignatureStatus> {
+    const r = await this.send({ type: 'signatureForget' });
+    if (r.type !== 'signature') throw new Error('unexpected reply');
+    return r.status;
   }
 
   async verifyResult(layers: LayerSetting[], master: number, analysisOptions: Partial<AnalysisOptions>, onProgress?: (stage: string, fraction: number) => void): Promise<Analysis> {

@@ -64,13 +64,39 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
         break;
       }
       case 'export': {
-        const { jpeg, report } = await engine.exportJpeg(msg.layers, msg.findings, msg.master, msg.profile, msg.options, msg.budget, msg.analysisOptions, progress, msg.bake);
+        const { jpeg, report } = await engine.exportJpeg(msg.layers, msg.findings, msg.master, msg.profile, msg.options, msg.budget, msg.analysisOptions, progress, msg.bake, msg.signature);
         post({ type: 'export', id, jpeg, report }, [jpeg.buffer]);
         break;
       }
       case 'liveCheck': {
-        const report = await engine.liveCheck(msg.layers, msg.findings, msg.master, msg.profile, msg.options, msg.bake);
+        const report = await engine.liveCheck(msg.layers, msg.findings, msg.master, msg.profile, msg.options, msg.bake, msg.signature);
         post({ type: 'live', id, report });
+        break;
+      }
+      case 'signatureLearn': {
+        const learned = await engine.signatureLearn(msg.file as Blob & { name?: string });
+        await engine.signature.save();
+        post({ type: 'signature', id, status: await engine.signatureStatus(), learned });
+        break;
+      }
+      case 'signatureStatus': {
+        post({ type: 'signature', id, status: await engine.signatureStatus() });
+        break;
+      }
+      case 'signatureExport': {
+        await engine.signature.save();
+        const bytes = engine.signature.exportBlob();
+        post({ type: 'bytes', id, bytes }, bytes ? [bytes.buffer] : []);
+        break;
+      }
+      case 'signatureImport': {
+        await engine.signature.importBlob(msg.bytes);
+        post({ type: 'signature', id, status: await engine.signatureStatus() });
+        break;
+      }
+      case 'signatureForget': {
+        await engine.signature.forget();
+        post({ type: 'signature', id, status: await engine.signatureStatus() });
         break;
       }
       case 'verifyResult': {

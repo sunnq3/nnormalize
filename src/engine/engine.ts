@@ -9,6 +9,9 @@ import { analyze } from '../analysis/analyze';
 import { jpegYccToRgb, rgbToJpegYcc, settleBlocks } from '../dsp/jpegdomain';
 import { noiseMap } from '../dsp/noise';
 import { calibrateSensorNoise, cfaSignature, rebakeThroughSensor, type BakeStyle } from '../dsp/cfa';
+import { cropPlane } from '../dsp/plane';
+import { prnuApply, prnuCalibrate, prnuKey, prnuMeasure, type PrnuMap } from '../dsp/prnu';
+import { SignatureBank, type SignatureStatus } from './signature';
 import { measureSurvival } from '../analysis/survival';
 import { computeDelta } from '../analysis/apply';
 import type { Analysis, AnalysisOptions, Finding } from '../analysis/types';
@@ -20,7 +23,7 @@ import { resolveProfile, type ProfileId } from './profiles';
 import { decodeImage, type SourceImage, type SourceMeta } from '../io/decode';
 import { parseJpeg } from '../io/jpegParse';
 import { psnr, rng, synthesize } from '../synth/generate';
-import type { BakeSetting, Budget, LayerSetting, LayerStats, LiveReport, SensorReport, LoadedInfo, RenderRequest, RenderResult, RoundTripReport, SynthRequest } from './protocol';
+import type { BakeSetting, Budget, LayerSetting, LayerStats, LiveReport, SensorReport, SignatureReport, LoadedInfo, RenderRequest, RenderResult, RoundTripReport, SynthRequest } from './protocol';
 
 const DELTA_SCALE = 16384; // Int16 fixed point: ±2.0 range, 1/64 of a level resolution
 
@@ -64,7 +67,69 @@ export class Engine {
   // --- loading ---------------------------------------------------------------
   async load(file: Blob & { name?: string }): Promise<LoadedInfo> {
     const img = await decodeImage(file);
-    return this.setSource(img);
+    const info = this.setSource(img);
+    // the sensor signature learns from every photo that names its camera
+    const key = prnuKey(img.meta.exifSummary.make, img.meta.exifSummary.model, img.w, img.h);
+    this.signature.photoKey = key;
+    if (key) {
+      await this.signature.select(key);
+      await this.signature.learn(key, img.planes, lumaPlane(img.planes[0], img.planes[1], img.planes[2]), `${img.meta.fileName}|${img.meta.byteLength}`);
+      await this.signature.save();
+    }
+    return info;
+  }
+
+  readonly signature = new SignatureBank();
+  private exportMemo = new Map<string, number>();
+
+  private async signatureInCopies(sig: SignatureReport | null, ours: [Plane, Plane, Plane], resDest: [Plane, Plane, Plane]): Promise<SignatureReport | undefined> {
+    if (!sig) return undefined;
+    const map = await this.signature.mapFor(this.signature.photoKey);
+    if (!map) return undefined;
+    const f = prnuMeasure(ours, map);
+    const p = prnuMeasure(resDest, map);
+    return { ...sig, inFile: f.rho, posted: p.rho, zPosted: p.z };
+  }
+
+  /** Learn the sensor signature from a photo without loading it as the photo to fix. */
+  async signatureLearn(file: Blob & { name?: string }): Promise<{ accepted: boolean; reason: string; usable: number; key: string | null }> {
+    const img = await decodeImage(file);
+    const key = prnuKey(img.meta.exifSummary.make, img.meta.exifSummary.model, img.w, img.h);
+    if (!key) return { accepted: false, reason: 'the file names no camera (no EXIF), so it cannot be filed under one', usable: 0, key: null };
+    const r = await this.signature.learn(key, img.planes, lumaPlane(img.planes[0], img.planes[1], img.planes[2]), `${img.meta.fileName}|${img.meta.byteLength}`);
+    return { ...r, key };
+  }
+
+  async signatureStatus(): Promise<SignatureStatus> {
+    return this.signature.status();
+  }
+
+  /**
+   * The signature put back into a finished crop: calibrated so the result
+   * carries as much of it as the untouched photo did at the same place.
+   */
+  private async restoreSignature(composed: [Plane, Plane, Plane], source: [Plane, Plane, Plane], offset: { x0: number; y0: number }, memo: Map<string, number>, progress: (fraction: number) => void): Promise<{ planes: [Plane, Plane, Plane]; report: SignatureReport | null }> {
+    const map = await this.signature.mapFor(this.signature.photoKey, progress);
+    if (!map) return { planes: composed, report: null };
+    const orig = memoNum(memo, 'prnu:s', () => prnuMeasure(source, map, offset).rho);
+    const zOrig = orig * Math.sqrt(source[0].w * source[0].h);
+    const before = prnuMeasure(composed, map, offset);
+    // the calibration runs on a centre window of at most 1024 px, the gain then goes to the whole
+    const cw = Math.min(1024, composed[0].w);
+    const ch = Math.min(1024, composed[0].h);
+    const cx = (composed[0].w - cw) >> 1;
+    const cy = (composed[0].h - ch) >> 1;
+    const win = composed.map((p) => cropPlane(p, cx, cy, cw, ch)) as [Plane, Plane, Plane];
+    const swin = source.map((p) => cropPlane(p, cx, cy, cw, ch)) as [Plane, Plane, Plane];
+    const woff = { x0: offset.x0 + cx, y0: offset.y0 + cy };
+    const target = prnuMeasure(swin, map, woff).rho;
+    const { gain } = prnuCalibrate(win, map, target, woff);
+    const planes = gain > 0 ? prnuApply(composed, map, gain, offset) : composed;
+    const after = gain > 0 ? prnuMeasure(planes, map, offset) : before;
+    return {
+      planes,
+      report: { photos: map.photos, reliability: map.reliability, original: orig, result: after.rho, inFile: 0, posted: 0, zOriginal: zOrig, zPosted: 0, gain, restored: gain > 0 },
+    };
   }
 
   synth(spec: SynthRequest): LoadedInfo {
@@ -130,6 +195,8 @@ export class Engine {
 
   private setSource(img: SourceImage): LoadedInfo {
     this.source = img;
+    this.exportMemo.clear();
+    this.signature.photoKey = null;
     this.analysis = null;
     this.layers.clear();
     this.masks.clear();
@@ -563,7 +630,7 @@ export class Engine {
    * photo's side is kept between runs. Also tunes how much the grain put
    * back has to be raised so the copy carries the amount set.
    */
-  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions, bake: BakeSetting = 'clean'): Promise<LiveReport> {
+  async liveCheck(layers: LayerSetting[], findings: Finding[], master: number, profileId: ProfileId, customOptions: JpegExportOptions, bake: BakeSetting = 'clean', signature = false): Promise<LiveReport> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const t0 = performance.now();
     const profile = resolveProfile(profileId, customOptions);
@@ -604,6 +671,12 @@ export class Engine {
       let composed = crop(useLayers, master);
       // the crop starts on a multiple of 32, so the sensor grid keeps its place
       if (bake !== 'off') composed = this.bakeThroughSensor(composed, opts.quality, cache.source, bake);
+      let sig: SignatureReport | null = null;
+      if (signature) {
+        const r = await this.restoreSignature(composed, cache.source, { x0, y0 }, cache.values, () => {});
+        composed = r.planes;
+        sig = r.report;
+      }
       if (opts.tables === 'annex-k' && !opts.trellis && blockFixOn && master > 0) {
         const [Y, Cb, Cr] = rgbToJpegYcc(composed[0], composed[1], composed[2]);
         const r = settleBlocks(Y, opts.quality, { grainLevels: noiseMap(Y, 32).refSigma * 255, iterations: 2 });
@@ -626,6 +699,14 @@ export class Engine {
         inFile: cfaSignature(written.planes),
         posted: cfaSignature(resDest),
       };
+      if (sig) {
+        const map = await this.signature.mapFor(this.signature.photoKey);
+        if (map) {
+          const f = prnuMeasure(written.planes, map, { x0, y0 });
+          const p = prnuMeasure(resDest, map, { x0, y0 });
+          sensor.signature = { ...sig, inFile: f.rho, posted: p.rho, zPosted: p.z };
+        }
+      }
       // learn the grain scale (kept for the next check and for the save)
       const g = survival.fixes.find((f) => f.kind === 'grain');
       if (!g || want <= 0 || g.resultOnDest <= 0.05) break;
@@ -657,6 +738,7 @@ export class Engine {
     analysisOptions: Partial<AnalysisOptions>,
     progress: (stage: string, fraction: number) => void,
     bake: BakeSetting = 'clean',
+    signature = false,
   ): Promise<{ jpeg: Uint8Array; report: RoundTripReport }> {
     if (!this.source || !this.analysis) throw new Error('analyse first');
     const profile = resolveProfile(profileId, customOptions);
@@ -672,6 +754,7 @@ export class Engine {
     let grainScale = this.grainScale;
     let composed!: [Plane, Plane, Plane];
     let settled: RoundTripReport['settled'] = null;
+    let sig: SignatureReport | null = null;
     let jpeg!: Uint8Array;
     let enc!: Awaited<ReturnType<typeof encodeToJpeg>>;
     let ours!: [Plane, Plane, Plane];
@@ -685,6 +768,13 @@ export class Engine {
       if (bake !== 'off') {
         progress('bake', 0);
         composed = this.bakeThroughSensor(composed, opts.quality, this.source.planes, bake);
+      }
+      sig = null;
+      if (signature) {
+        progress('signature', 0);
+        const r = await this.restoreSignature(composed, this.source.planes, { x0: 0, y0: 0 }, this.exportMemo, (f) => progress('signature', f));
+        composed = r.planes;
+        sig = r.report;
       }
       // Block settling at the destination's quality: when the file is written
       // with the destination's own tables and the block fix is on, the luma is
@@ -785,7 +875,7 @@ export class Engine {
       stable: enc.stable,
       settled,
       grainScale,
-      sensor: { baked: bake !== 'off', noiseLevels: this.sensorNoiseLevels, method: this.sensorMethod, layout: this.cfaLayout(), detected: this.analysis.cfa.detected, original: cfaSignature(this.source.planes), inFile: cfaSignature(ours), posted: cfaSignature(resDest) },
+      sensor: { baked: bake !== 'off', noiseLevels: this.sensorNoiseLevels, method: this.sensorMethod, layout: this.cfaLayout(), detected: this.analysis.cfa.detected, original: cfaSignature(this.source.planes), inFile: cfaSignature(ours), posted: cfaSignature(resDest), signature: await this.signatureInCopies(sig, ours, resDest) },
       checkLabel: profile.check.label,
       survival,
       residual,

@@ -7,6 +7,7 @@ import type { Analysis, AnalysisOptions, CleanupLevel, Finding, PeriodicMethod }
 import type { FixSurvival } from '../analysis/survival';
 import { EngineClient } from '../engine/client';
 import { defaultBudget, type Budget, type BakeSetting, type LayerSetting, type LiveReport, type LoadedInfo, type RoundTripReport, type SynthRequest, type ViewMode } from '../engine/protocol';
+import type { SignatureStatus } from '../engine/signature';
 import type { JpegExportOptions } from '../io/encode';
 import { PROFILES, resolveProfile, type ProfileId } from '../engine/profiles';
 import { stageSorted } from '../engine/engine';
@@ -80,6 +81,10 @@ export class App {
   private settingsEl!: HTMLElement;
   private scrollToReport = false;
   private bake: BakeSetting = 'clean';
+  private signatureOn = false;
+  private signatureStatus: SignatureStatus | null = null;
+  private signatureInput!: HTMLInputElement;
+  private signatureFileInput!: HTMLInputElement;
   private liveEl!: HTMLElement;
   private liveTimer: ReturnType<typeof setTimeout> | null = null;
   private liveRunning = false;
@@ -224,6 +229,18 @@ export class App {
       if (f) void this.loadRecipe(f);
       this.recipeInput.value = '';
     });
+    this.signatureInput = el('input', { type: 'file', multiple: '', id: 'signature-photos', accept: 'image/*,.heic,.heif,.tif,.tiff', style: 'display:none' }) as HTMLInputElement;
+    this.signatureInput.addEventListener('change', () => {
+      const files = Array.from(this.signatureInput.files ?? []);
+      if (files.length) void this.learnSignature(files);
+      this.signatureInput.value = '';
+    });
+    this.signatureFileInput = el('input', { type: 'file', accept: '.nnprnu', style: 'display:none' }) as HTMLInputElement;
+    this.signatureFileInput.addEventListener('change', () => {
+      const f = this.signatureFileInput.files?.[0];
+      if (f) void this.importSignature(f);
+      this.signatureFileInput.value = '';
+    });
     this.batchInput = el('input', { type: 'file', multiple: '', accept: 'image/*,.heic,.heif,.tif,.tiff', style: 'display:none' }) as HTMLInputElement;
     this.batchInput.addEventListener('change', () => {
       const files = Array.from(this.batchInput.files ?? []);
@@ -270,6 +287,8 @@ export class App {
         this.analysisEl,
         this.recipeInput,
         this.batchInput,
+        this.signatureInput,
+        this.signatureFileInput,
       ),
     );
     const side = el(
@@ -342,7 +361,7 @@ export class App {
     this.liveError = '';
     this.renderLive();
     try {
-      this.liveReport = await this.client.liveCheck(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.bake);
+      this.liveReport = await this.client.liveCheck(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.bake, this.signatureWanted());
     } catch (e) {
       this.liveError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -408,6 +427,17 @@ export class App {
           : `Sensor bake is off. Grid pattern in your file ${pct(sn.inFile)}, after the re-save ${pct(sn.posted)} (the original photo: ${pct(sn.original)}).`,
       ),
     );
+    if (sn.signature) {
+      const g = sn.signature;
+      const c = (v: number): string => v.toFixed(3);
+      box.appendChild(
+        el(
+          'div',
+          { class: 'livesub' },
+          `Sensor signature (learned from ${g.photos} photos, reliability ${Math.round(g.reliability * 100)} %): correlation with the map ${c(g.original)} in the untouched photo, ${c(g.result)} in your picture${g.restored ? ` after putting it back (gain ${g.gain.toFixed(2)})` : ' (nothing put back)'}, ${c(g.inFile)} in the file written for this destination, ${c(g.posted)} after its re-save${g.original > 0 ? ` (${Math.round((100 * g.posted) / g.original)} % of what the untouched photo carried)` : ''}.${g.original > 0 && g.posted < 0.35 * g.original ? ' A re-save at this quality wears most of the signature away, the original’s too; it survives into a Master copy.' : ''}`,
+        ),
+      );
+    }
     const where = r.region.full ? 'Checked on the whole photo' : `Checked on the centre ${r.region.w} × ${r.region.h} px of the photo`;
     box.appendChild(el('div', { class: 'livesub' }, `${where}, in ${(r.ms / 1000).toFixed(1)} s. File about ${Math.round(r.bytesEstimate / 1024)} kB. Saving checks the whole photo.`));
   }
@@ -682,6 +712,7 @@ export class App {
     this.renderFindings();
     this.renderDetail();
     this.renderExport();
+    void this.refreshSignature();
     const orig = await this.client.render({ region: { kind: 'preview' }, mode: 'original', layers: [], master: 1, diffGain: 1, maskId: null });
     await this.viewer.setOriginalPreview(orig);
     await this.viewer.refresh();
@@ -1213,6 +1244,109 @@ export class App {
   }
 
   // --- export -----------------------------------------------------------------------
+  private signatureWanted(): boolean {
+    return this.signatureOn && !!this.signatureStatus?.ready && !!this.signatureStatus.matchesPhoto;
+  }
+
+  private async refreshSignature(): Promise<void> {
+    try {
+      this.signatureStatus = await this.client.signatureStatus();
+    } catch {
+      this.signatureStatus = null;
+    }
+    this.renderExport();
+  }
+
+  /** The sensor-signature block: what is known about this camera, and the controls to teach, keep and use it. */
+  private renderSignature(): HTMLElement {
+    const box = el('div', { class: 'signature' });
+    const st = this.signatureStatus;
+    const title = el('div', { class: 'row wide', title: 'Every photosite on a sensor has its own gain, a fraction of a percent off its neighbours’, fixed for life: the camera’s signature, riding on every photo it takes. Clean-up and re-saves wear it away. The tool learns the pattern from your photos (the smooth, well-lit parts of every photo you load, or a batch of blurry wall shots) and can put the real one back.' }, el('span', {}, 'Sensor signature'));
+    box.appendChild(title);
+    let text: string;
+    if (!st) text = 'Checking what this browser knows about your camera…';
+    else if (!st.photoKey) text = 'This file names no camera, so there is no signature to file it under.';
+    else if (!st.key || !st.matchesPhoto) text = `Nothing learned yet for ${st.photoKey.replace('|', ' at ')}.${st.others.length ? ` Other signatures kept here: ${st.others.map((o) => `${o.key.replace('|', ' at ')} (${o.photos} photos)`).join(', ')}.` : ''}`;
+    else {
+      const rel = Math.round(st.reliability * 100);
+      const quality = st.photos < 4 ? 'too few photos yet' : st.reliability < 0.3 ? 'not reliable enough to use yet' : st.reliability < 0.6 ? 'usable, still improving' : st.reliability < 0.85 ? 'good' : 'excellent';
+      text = `${st.camera} at ${st.size}: learned from ${st.photos} photo${st.photos === 1 ? '' : 's'}, reliability ${rel} % (${quality}).`;
+    }
+    box.appendChild(el('div', { class: 'intro' }, text));
+    const cb = el('input', { type: 'checkbox' }) as HTMLInputElement;
+    cb.checked = this.signatureOn;
+    cb.disabled = !st?.ready || !st.matchesPhoto;
+    cb.addEventListener('change', () => {
+      this.signatureOn = cb.checked;
+      this.checked = false;
+      this.scheduleLive();
+    });
+    box.appendChild(
+      el(
+        'div',
+        { class: 'row wide', title: 'Multiplies the finished picture by the learned pattern, scaled by its reliability and calibrated so the photo carries as much of the signature as it did before the clean-up. Nothing synthetic: it is this sensor’s own gain map. A quality-75 re-save (Reddit) erases it again; it survives into a Master copy.' },
+        el('label', {}, cb, ' Put the sensor’s own signature back into the saved file'),
+        el('span'),
+      ),
+    );
+    const actions = el('div', { class: 'actions' });
+    actions.appendChild(el('button', { class: 'quiet', onclick: () => this.signatureInput.click(), title: 'Teach it from a batch at once: 30–50 defocused shots of plain, evenly lit walls or ceilings, straight from the camera at full size (not sent through a chat app, which re-saves them). Ordinary photos work too, more slowly.' }, 'Learn from photos…'));
+    actions.appendChild(el('button', { class: 'quiet', onclick: () => void this.exportSignature(), disabled: st?.key ? undefined : '', title: 'Save the learned signature as a file, to load again here or on another device' }, 'Export'));
+    actions.appendChild(el('button', { class: 'quiet', onclick: () => this.signatureFileInput.click(), title: 'Load a signature file saved earlier' }, 'Import'));
+    actions.appendChild(el('button', { class: 'quiet', onclick: () => void this.forgetSignature(), disabled: st?.key ? undefined : '', title: 'Delete this camera’s learned signature from this browser' }, 'Forget'));
+    box.appendChild(actions);
+    return box;
+  }
+
+  private async learnSignature(files: File[]): Promise<void> {
+    let accepted = 0;
+    const reasons = new Map<string, number>();
+    for (let i = 0; i < files.length; i++) {
+      this.setStatus(`Learning the sensor signature: ${i + 1} of ${files.length} (${files[i].name})`, (i + 1) / files.length);
+      try {
+        const r = await this.client.signatureLearn(files[i]);
+        this.signatureStatus = r.status;
+        if (r.learned.accepted) accepted++;
+        else reasons.set(r.learned.reason, (reasons.get(r.learned.reason) ?? 0) + 1);
+      } catch (e) {
+        reasons.set(e instanceof Error ? e.message : String(e), 1);
+      }
+    }
+    const skipped = [...reasons].map(([r, n]) => `${n} skipped: ${r}`).join('; ');
+    const st = this.signatureStatus;
+    this.setStatus(`Learned from ${accepted} photo${accepted === 1 ? '' : 's'}${skipped ? ` (${skipped})` : ''}.${st?.key ? ` ${st.camera} at ${st.size}: ${st.photos} photos, reliability ${Math.round(st.reliability * 100)} %.` : ''}`);
+    this.renderExport();
+    if (this.signatureWanted()) this.scheduleLive();
+  }
+
+  private async exportSignature(): Promise<void> {
+    const bytes = await this.client.signatureExport();
+    if (!bytes) return;
+    const st = this.signatureStatus;
+    const name = `${(st?.key ?? 'signature').replace(/[^A-Za-z0-9_-]+/g, '_')}.nnprnu`;
+    const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/octet-stream' }));
+    const a = el('a', { href: url, download: name }) as HTMLAnchorElement;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  private async importSignature(f: File): Promise<void> {
+    try {
+      this.signatureStatus = await this.client.signatureImport(new Uint8Array(await f.arrayBuffer()));
+      this.setStatus(`Signature loaded: ${this.signatureStatus.key?.replace('|', ' at ')} (${this.signatureStatus.photos} photos).`);
+    } catch (e) {
+      this.setStatus(`Could not load that file: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.renderExport();
+  }
+
+  private async forgetSignature(): Promise<void> {
+    this.signatureStatus = await this.client.signatureForget();
+    this.signatureOn = false;
+    this.renderExport();
+    this.scheduleLive();
+  }
+
   private renderExport(): void {
     const box = this.exportEl;
     box.innerHTML = '';
@@ -1296,6 +1430,7 @@ export class App {
       ),
     );
     box.appendChild(el('div', { class: 'intro' }, `Bakes the finished picture through a camera sensor on ${layout}.`));
+    box.appendChild(this.renderSignature());
 
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(true), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));
@@ -1347,6 +1482,7 @@ export class App {
     fact('file', `${(r.bytes / 1024).toFixed(0)} kB, quality ${r.quality}, ${r.chroma === '4:4:4' ? 'full colour detail' : 'reduced colour detail'}`);
     if (r.passes > 1) fact('settled', r.stable ? `yes, in ${r.passes} passes: a re-save there reproduces it` : `not fully after ${r.passes} passes`);
     if (r.grainScale && r.grainScale !== 1) fact('grain put back', `added at ${fmt(r.grainScale, 1)}× the amount set, because the re-save rounds part of it away; the copy carries about the amount set`);
+    if (r.sensor?.signature) fact('sensor signature', `correlation with the learned map ${r.sensor.signature.original.toFixed(3)} in the untouched photo, ${r.sensor.signature.inFile.toFixed(3)} in the file, ${r.sensor.signature.posted.toFixed(3)} after the re-save${r.sensor.signature.restored ? ` (put back at gain ${r.sensor.signature.gain.toFixed(2)})` : ''}`);
     if (r.sensor) fact('sensor bake', r.sensor.baked ? `${r.sensor.layout} grid, ${r.sensor.method === 'bilinear' ? 'bilinear' : 'Malvar–He–Cutler'} fill-in, photon noise ${fmt(r.sensor.noiseLevels, 1)} lv; pattern ${Math.round(r.sensor.inFile * 100)} % in the file, ${Math.round(r.sensor.posted * 100)} % after the re-save (original ${Math.round(r.sensor.original * 100)} %)` : 'off');
     if (r.settled)
       fact(
@@ -1392,8 +1528,9 @@ export class App {
     this.exportBtn.disabled = true;
     try {
       const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
-        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^regrain$/, 'writing again with more grain so the copy carries the amount set').replace(/^bake$/, 'baking through a camera sensor').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
+        this.setStatus(`${download ? 'Saving' : 'Checking'}: ${stage.replace('check:', 'looking at the downloader’s copy — ').replace(/^settle$/, 'settling block edges on their grid').replace(/^regrain$/, 'writing again with more grain so the copy carries the amount set').replace(/^bake$/, 'baking through a camera sensor').replace(/^signature$/, 'putting the sensor’s own signature back').replace(/^encode$/, 'writing and settling the file').replace(/^check$/, 'simulating the re-save')}`, fr),
         this.bake,
+        this.signatureWanted(),
       );
       if (this.jpegUrl) URL.revokeObjectURL(this.jpegUrl);
       this.jpegUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: 'image/jpeg' }));
@@ -1504,6 +1641,7 @@ export class App {
         const { jpeg, report } = await this.client.export(this.layerSettings(), this.analysis.findings, this.master, this.profileId, this.exportOptions, this.budget, this.analysisOptions, (stage, fr) =>
           this.setStatus(`Batch ${i + 1}/${files.length}: ${f.name} — ${stage}`, fr),
           this.bake,
+          this.signatureWanted(),
         );
         this.report = report;
         this.renderExport();

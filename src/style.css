@@ -716,3 +716,12 @@ details.more > summary {
   margin: 8px 0;
   color: var(--ink-soft);
 }
+
+.signature {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+.signature .actions {
+  margin-top: 6px;
+}
