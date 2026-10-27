@@ -85,6 +85,8 @@ export class App {
   private signatureStatus: SignatureStatus | null = null;
   private signatureInput!: HTMLInputElement;
   private signatureFileInput!: HTMLInputElement;
+  private signatureProgress = el('div', { class: 'sigprogress' });
+  private signatureEl = el('div', { class: 'signature' });
   private liveEl!: HTMLElement;
   private liveTimer: ReturnType<typeof setTimeout> | null = null;
   private liveRunning = false;
@@ -332,6 +334,7 @@ export class App {
     this.setMode('result');
     this.setZoom('fit');
     this.renderSource();
+    void this.refreshSignature();
     this.renderSettings();
     this.renderAnalysisPanel();
     this.renderFindings();
@@ -1219,9 +1222,11 @@ export class App {
     if (!this.info) {
       box.appendChild(el('div', { class: 'welcome' }, el('p', {}, 'Open a photo, or drop one on the dark area. Nothing leaves your computer.'), el('p', {}, 'Then: choose how far to go and where the photo is going (2), look over what it found and untick anything you want kept (3), and save; the tool checks that every fix survives the place you post it (4).')));
       box.appendChild(buttons);
+      box.appendChild(this.renderSignature());
       return;
     }
     box.appendChild(buttons);
+    box.appendChild(this.renderSignature());
     const m = this.info.meta;
     const grid = el('div', { class: 'source' });
     const det = el('details', { class: 'advanced' }, el('summary', {}, `${m.fileName}, ${this.info.w} × ${this.info.h} px${m.jpeg?.quality ? `, saved at about quality ${fmt(m.jpeg.quality, 0)}` : ''}`), grid);
@@ -1254,43 +1259,35 @@ export class App {
     } catch {
       this.signatureStatus = null;
     }
+    this.renderSource();
     this.renderExport();
   }
 
-  /** The sensor-signature block: what is known about this camera, and the controls to teach, keep and use it. */
+  /** Step 1's "Your camera" block: what is known about it, and the controls to teach, keep and forget the signature. */
   private renderSignature(): HTMLElement {
-    const box = el('div', { class: 'signature' });
+    const box = this.signatureEl;
+    box.innerHTML = '';
     const st = this.signatureStatus;
-    const title = el('div', { class: 'row wide', title: 'Every photosite on a sensor has its own gain, a fraction of a percent off its neighbours’, fixed for life: the camera’s signature, riding on every photo it takes. Clean-up and re-saves wear it away. The tool learns the pattern from your photos (the smooth, well-lit parts of every photo you load, or a batch of blurry wall shots) and can put the real one back.' }, el('span', {}, 'Sensor signature'));
-    box.appendChild(title);
-    let text: string;
-    if (!st) text = 'Checking what this browser knows about your camera…';
-    else if (!st.photoKey) text = 'This file names no camera, so there is no signature to file it under.';
-    else if (!st.key || !st.matchesPhoto) text = `Nothing learned yet for ${st.photoKey.replace('|', ' at ')}.${st.others.length ? ` Other signatures kept here: ${st.others.map((o) => `${o.key.replace('|', ' at ')} (${o.photos} photos)`).join(', ')}.` : ''}`;
-    else {
-      const rel = Math.round(st.reliability * 100);
-      const quality = st.photos < 4 ? 'too few photos yet' : st.reliability < 0.3 ? 'not reliable enough to use yet' : st.reliability < 0.6 ? 'usable, still improving' : st.reliability < 0.85 ? 'good' : 'excellent';
-      text = `${st.camera} at ${st.size}: learned from ${st.photos} photo${st.photos === 1 ? '' : 's'}, reliability ${rel} % (${quality}).`;
-    }
-    box.appendChild(el('div', { class: 'intro' }, text));
-    const cb = el('input', { type: 'checkbox' }) as HTMLInputElement;
-    cb.checked = this.signatureOn;
-    cb.disabled = !st?.ready || !st.matchesPhoto;
-    cb.addEventListener('change', () => {
-      this.signatureOn = cb.checked;
-      this.checked = false;
-      this.scheduleLive();
-    });
     box.appendChild(
       el(
-        'div',
-        { class: 'row wide', title: 'Multiplies the finished picture by the learned pattern, scaled by its reliability and calibrated so the photo carries as much of the signature as it did before the clean-up. Nothing synthetic: it is this sensor’s own gain map. A quality-75 re-save (Reddit) erases it again; it survives into a Master copy.' },
-        el('label', {}, cb, ' Put the sensor’s own signature back into the saved file'),
-        el('span'),
+        'h3',
+        { title: 'Every photosite on a sensor has its own gain, a fraction of a percent off its neighbours’, fixed for life: the camera’s signature, riding on every photo it takes. Clean-up and re-saves wear it away. Teach the tool the pattern once and it can put the real one back into finished pictures (step 4).' },
+        'Your camera',
+        el('span', { class: 'sub' }, 'its sensor signature'),
       ),
     );
+    let text: string;
+    if (!st) text = 'Checking what this browser knows…';
+    else if (st.key) {
+      const rel = Math.round(st.reliability * 100);
+      const quality = st.photos < 4 ? 'too few photos yet' : st.reliability < 0.3 ? 'not reliable enough to use yet' : st.reliability < 0.6 ? 'usable, still improving' : st.reliability < 0.85 ? 'good' : 'excellent';
+      text = `${st.camera} at ${st.size}: learned from ${st.photos} photo${st.photos === 1 ? '' : 's'}, reliability ${rel} % (${quality}).${st.photoKey && !st.matchesPhoto ? ` The open photo is from ${st.photoKey.replace('|', ' at ')}, which has no signature yet.` : ''}`;
+    } else if (st.others.length) text = `Signatures kept here: ${st.others.map((o) => `${o.key.replace('|', ' at ')} (${o.photos} photos)`).join(', ')}. Open a photo from one of these cameras to use it.`;
+    else text = 'Nothing learned yet. Teach it from 30–50 defocused shots of plain, evenly lit walls or ceilings, straight from the camera at full size (files sent through a chat app have been re-saved and carry nothing). Every photo you open teaches it a little as well.';
+    box.appendChild(el('div', { class: 'intro' }, text));
+    box.appendChild(this.signatureProgress);
     const actions = el('div', { class: 'actions' });
-    actions.appendChild(el('button', { class: 'quiet', onclick: () => this.signatureInput.click(), title: 'Teach it from a batch at once: 30–50 defocused shots of plain, evenly lit walls or ceilings, straight from the camera at full size (not sent through a chat app, which re-saves them). Ordinary photos work too, more slowly.' }, 'Learn from photos…'));
+    actions.appendChild(el('button', { class: st?.ready ? 'quiet' : 'primary', onclick: () => this.signatureInput.click(), title: 'Pick a batch of photos; each is read, measured and folded in. Nothing is uploaded.' }, 'Teach it from photos…'));
     actions.appendChild(el('button', { class: 'quiet', onclick: () => void this.exportSignature(), disabled: st?.key ? undefined : '', title: 'Save the learned signature as a file, to load again here or on another device' }, 'Export'));
     actions.appendChild(el('button', { class: 'quiet', onclick: () => this.signatureFileInput.click(), title: 'Load a signature file saved earlier' }, 'Import'));
     actions.appendChild(el('button', { class: 'quiet', onclick: () => void this.forgetSignature(), disabled: st?.key ? undefined : '', title: 'Delete this camera’s learned signature from this browser' }, 'Forget'));
@@ -1301,21 +1298,61 @@ export class App {
   private async learnSignature(files: File[]): Promise<void> {
     let accepted = 0;
     const reasons = new Map<string, number>();
+    const prog = this.signatureProgress;
+    const bar = el('div', { class: 'bar' }, el('div', { class: 'fill' }));
+    const line = el('div', { class: 'line' });
+    const log = el('div', { class: 'log' });
+    prog.innerHTML = '';
+    prog.append(line, bar, log);
+    const t0 = performance.now();
     for (let i = 0; i < files.length; i++) {
-      this.setStatus(`Learning the sensor signature: ${i + 1} of ${files.length} (${files[i].name})`, (i + 1) / files.length);
+      const per = i ? (performance.now() - t0) / i : 0;
+      const left = per ? ` · about ${Math.ceil((per * (files.length - i)) / 1000)} s left` : '';
+      line.textContent = `Reading ${i + 1} of ${files.length}: ${files[i].name}${left}`;
+      (bar.firstChild as HTMLElement).style.width = `${Math.round((100 * i) / files.length)}%`;
+      this.setStatus(`Teaching the sensor signature: ${i + 1} of ${files.length}`, (i + 1) / files.length);
+      let note: string;
       try {
-        const r = await this.client.signatureLearn(files[i]);
+        // a dead worker (out of memory on a huge file) never answers: say so instead of hanging
+        const r = await Promise.race([
+          this.client.signatureLearn(files[i]),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('no answer after 4 minutes; the browser probably ran out of memory. Reload the page and try fewer or smaller photos')), 240000)),
+        ]);
         this.signatureStatus = r.status;
-        if (r.learned.accepted) accepted++;
-        else reasons.set(r.learned.reason, (reasons.get(r.learned.reason) ?? 0) + 1);
+        if (r.learned.accepted) {
+          accepted++;
+          note = `${Math.round(r.learned.usable * 100)} % of it usable`;
+        } else {
+          reasons.set(r.learned.reason, (reasons.get(r.learned.reason) ?? 0) + 1);
+          note = `skipped: ${r.learned.reason}`;
+        }
       } catch (e) {
-        reasons.set(e instanceof Error ? e.message : String(e), 1);
+        const msg = e instanceof Error ? e.message : String(e);
+        reasons.set(msg, (reasons.get(msg) ?? 0) + 1);
+        note = `failed: ${msg}`;
+        if (msg.startsWith('no answer')) {
+          log.prepend(el('div', {}, `${files[i].name}: ${note}`));
+          break;
+        }
       }
+      log.prepend(el('div', {}, `${files[i].name}: ${note}`));
+      while (log.childElementCount > 6) log.lastElementChild?.remove();
+    }
+    (bar.firstChild as HTMLElement).style.width = '100%';
+    line.textContent = 'Saving…';
+    try {
+      this.signatureStatus = await this.client.signatureSave();
+    } catch {
+      /* kept in memory for this session at least */
     }
     const skipped = [...reasons].map(([r, n]) => `${n} skipped: ${r}`).join('; ');
     const st = this.signatureStatus;
-    this.setStatus(`Learned from ${accepted} photo${accepted === 1 ? '' : 's'}${skipped ? ` (${skipped})` : ''}.${st?.key ? ` ${st.camera} at ${st.size}: ${st.photos} photos, reliability ${Math.round(st.reliability * 100)} %.` : ''}`);
+    const summary = `Learned from ${accepted} photo${accepted === 1 ? '' : 's'} in ${Math.round((performance.now() - t0) / 1000)} s${skipped ? ` (${skipped})` : ''}.${st?.key ? ` ${st.camera} at ${st.size}: ${st.photos} photos, reliability ${Math.round(st.reliability * 100)} %.` : ''}`;
+    this.setStatus(summary);
+    this.renderSource();
     this.renderExport();
+    this.signatureProgress.innerHTML = '';
+    this.signatureProgress.appendChild(el('div', { class: 'line' }, summary));
     if (this.signatureWanted()) this.scheduleLive();
   }
 
@@ -1337,12 +1374,15 @@ export class App {
     } catch (e) {
       this.setStatus(`Could not load that file: ${e instanceof Error ? e.message : String(e)}`);
     }
+    this.renderSource();
     this.renderExport();
   }
 
   private async forgetSignature(): Promise<void> {
     this.signatureStatus = await this.client.signatureForget();
     this.signatureOn = false;
+    this.signatureProgress.innerHTML = '';
+    this.renderSource();
     this.renderExport();
     this.scheduleLive();
   }
@@ -1430,7 +1470,25 @@ export class App {
       ),
     );
     box.appendChild(el('div', { class: 'intro' }, `Bakes the finished picture through a camera sensor on ${layout}.`));
-    box.appendChild(this.renderSignature());
+    {
+      const st = this.signatureStatus;
+      const cb = el('input', { type: 'checkbox' }) as HTMLInputElement;
+      cb.checked = this.signatureOn;
+      cb.disabled = !st?.ready || !st.matchesPhoto;
+      cb.addEventListener('change', () => {
+        this.signatureOn = cb.checked;
+        this.checked = false;
+        this.scheduleLive();
+      });
+      const why = !st ? '' : !st.photoKey ? ' (this file names no camera)' : !st.matchesPhoto ? ` (nothing learned yet for ${st.photoKey.replace('|', ' at ')}; teach it in step 1)` : !st.ready ? ` (${st.photos} photos so far, reliability ${Math.round(st.reliability * 100)} %: not reliable enough yet)` : ` (learned from ${st.photos} photos, reliability ${Math.round(st.reliability * 100)} %)`;
+      box.appendChild(
+        el(
+          'div',
+          { class: 'intro', title: 'Multiplies the finished picture by your camera’s learned gain map, scaled by its reliability and calibrated so the photo carries as much of the signature as it did before the clean-up. Nothing synthetic. A quality-75 re-save (Reddit) wears most of it away again; it survives into a Master copy.' },
+          el('label', {}, cb, ` Put the sensor’s own signature back${why}`),
+        ),
+      );
+    }
 
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', { class: 'primary', onclick: () => void this.doExport(true), disabled: this.analysis ? undefined : '' }, 'Save JPEG and check it'));

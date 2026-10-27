@@ -145,6 +145,12 @@ export class EngineClient {
     return r.status;
   }
 
+  async signatureSave(): Promise<SignatureStatus> {
+    const r = await this.send({ type: 'signatureSave' });
+    if (r.type !== 'signature') throw new Error('unexpected reply');
+    return r.status;
+  }
+
   async signatureForget(): Promise<SignatureStatus> {
     const r = await this.send({ type: 'signatureForget' });
     if (r.type !== 'signature') throw new Error('unexpected reply');

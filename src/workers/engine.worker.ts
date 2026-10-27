@@ -75,7 +75,6 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
       }
       case 'signatureLearn': {
         const learned = await engine.signatureLearn(msg.file as Blob & { name?: string });
-        await engine.signature.save();
         post({ type: 'signature', id, status: await engine.signatureStatus(), learned });
         break;
       }
@@ -91,6 +90,11 @@ ctx.onmessage = async (ev: MessageEvent<Request>) => {
       }
       case 'signatureImport': {
         await engine.signature.importBlob(msg.bytes);
+        post({ type: 'signature', id, status: await engine.signatureStatus() });
+        break;
+      }
+      case 'signatureSave': {
+        await engine.signature.save();
         post({ type: 'signature', id, status: await engine.signatureStatus() });
         break;
       }

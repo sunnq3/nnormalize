@@ -177,6 +177,7 @@ export type Request =
   | { type: 'signatureExport'; id: number }
   | { type: 'signatureImport'; id: number; bytes: Uint8Array }
   | { type: 'signatureForget'; id: number }
+  | { type: 'signatureSave'; id: number }
   | { type: 'presenceMask'; id: number; findingId: string }
   | { type: 'addPeak'; id: number; u: number; v: number }
   | { type: 'luminosityMask'; id: number; findingId: string; lo: number; hi: number; soft: number };
