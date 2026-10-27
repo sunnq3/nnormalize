@@ -1285,6 +1285,7 @@ export class App {
     } else if (st.others.length) text = `Signatures kept here: ${st.others.map((o) => `${o.key.replace('|', ' at ')} (${o.photos} photos)`).join(', ')}. Open a photo from one of these cameras to use it.`;
     else text = 'Nothing learned yet. Teach it from 30–50 defocused shots of plain, evenly lit walls or ceilings, straight from the camera at full size (files sent through a chat app have been re-saved and carry nothing). Every photo you open teaches it a little as well.';
     box.appendChild(el('div', { class: 'intro' }, text));
+    if (st?.saveError) box.appendChild(el('div', { class: 'intro', style: 'color:var(--warn, #e0a040)' }, `The signature ${st.saveError}.`));
     box.appendChild(this.signatureProgress);
     const actions = el('div', { class: 'actions' });
     actions.appendChild(el('button', { class: st?.ready ? 'quiet' : 'primary', onclick: () => this.signatureInput.click(), title: 'Pick a batch of photos; each is read, measured and folded in. Nothing is uploaded.' }, 'Teach it from photos…'));

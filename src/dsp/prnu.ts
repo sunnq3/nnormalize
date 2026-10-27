@@ -97,16 +97,26 @@ export function prnuWeights(luma: Plane): Float32Array {
 
 export const SPLIT_WINDOW = 512;
 
+/**
+ * The running sums are kept in 16 bits at fixed scales, so a 10-megapixel
+ * camera costs 120 MB rather than 240 and the arrays go to storage as they
+ * are. Σ w·W·I per photo is at most a few thousandths, so S1_SCALE gives
+ * ±2 with 6e-5 steps (a photo's share is tens of steps); Σ w·I² is at most 1
+ * per photo, so S2_SCALE gives 256 photos' worth with 0.004 steps.
+ */
+export const S1_SCALE = 16384;
+export const S2_SCALE = 256;
+
 /** The running sums for one camera at one size, plus a split-half pair on a centre window. */
 export interface PrnuStore {
   key: string;
   w: number;
   h: number;
-  s1: [Float32Array, Float32Array, Float32Array]; // Σ w·W·I per channel
-  s2: [Float32Array, Float32Array, Float32Array]; // Σ w·I²
+  s1: [Int16Array, Int16Array, Int16Array]; // Σ w·W·I per channel, × S1_SCALE
+  s2: [Uint16Array, Uint16Array, Uint16Array]; // Σ w·I², × S2_SCALE
   photos: number;
   /** split halves on the centre SPLIT_WINDOW² (green channel): photo n goes to half n mod 2 */
-  halves: { s1: [Float32Array, Float32Array]; s2: [Float32Array, Float32Array] };
+  halves: { s1: [Int16Array, Int16Array]; s2: [Uint16Array, Uint16Array] };
 }
 
 export function newPrnuStore(key: string, w: number, h: number): PrnuStore {
@@ -116,12 +126,21 @@ export function newPrnuStore(key: string, w: number, h: number): PrnuStore {
     key,
     w,
     h,
-    s1: [new Float32Array(n), new Float32Array(n), new Float32Array(n)],
-    s2: [new Float32Array(n), new Float32Array(n), new Float32Array(n)],
+    s1: [new Int16Array(n), new Int16Array(n), new Int16Array(n)],
+    s2: [new Uint16Array(n), new Uint16Array(n), new Uint16Array(n)],
     photos: 0,
-    halves: { s1: [new Float32Array(sw), new Float32Array(sw)], s2: [new Float32Array(sw), new Float32Array(sw)] },
+    halves: { s1: [new Int16Array(sw), new Int16Array(sw)], s2: [new Uint16Array(sw), new Uint16Array(sw)] },
   };
 }
+
+const addS1 = (a: Int16Array, i: number, v: number): void => {
+  const t = a[i] + Math.round(v * S1_SCALE);
+  a[i] = t > 32767 ? 32767 : t < -32768 ? -32768 : t;
+};
+const addS2 = (a: Uint16Array, i: number, v: number): void => {
+  const t = a[i] + Math.round(v * S2_SCALE);
+  a[i] = t > 65535 ? 65535 : t;
+};
 
 function splitRect(w: number, h: number): { x0: number; y0: number; sw: number; sh: number } {
   const sw = Math.min(SPLIT_WINDOW, w);
@@ -149,8 +168,8 @@ export function prnuAccumulate(store: PrnuStore, planes: [Plane, Plane, Plane], 
     for (let i = 0; i < I.length; i++) {
       const g = wgt[i];
       if (g === 0) continue;
-      s1[i] += g * W[i] * I[i];
-      s2[i] += g * I[i] * I[i];
+      addS1(s1, i, g * W[i] * I[i]);
+      addS2(s2, i, g * I[i] * I[i]);
     }
     if (c === 1) {
       const h1 = store.halves.s1[half];
@@ -159,8 +178,8 @@ export function prnuAccumulate(store: PrnuStore, planes: [Plane, Plane, Plane], 
         for (let x = 0; x < r.sw; x++) {
           const i = (r.y0 + y) * w + r.x0 + x;
           const g = wgt[i];
-          h1[y * r.sw + x] += g * W[i] * I[i];
-          h2[y * r.sw + x] += g * I[i] * I[i];
+          addS1(h1, y * r.sw + x, g * W[i] * I[i]);
+          addS2(h2, y * r.sw + x, g * I[i] * I[i]);
         }
     }
   }
@@ -324,7 +343,7 @@ export function prnuReliability(store: PrnuStore): { splitHalf: number; reliabil
   const r = splitRect(store.w, store.h);
   const halves = [0, 1].map((hh) => {
     const out = new Float32Array(r.sw * r.sh);
-    for (let i = 0; i < out.length; i++) out[i] = store.halves.s2[hh][i] > 1e-4 ? store.halves.s1[hh][i] / store.halves.s2[hh][i] : 0;
+    for (let i = 0; i < out.length; i++) out[i] = store.halves.s2[hh][i] > 0.05 * S2_SCALE ? store.halves.s1[hh][i] / S1_SCALE / (store.halves.s2[hh][i] / S2_SCALE) : 0;
     zeroMean(out, r.sw, r.sh);
     return wienerDft(out, r.sw, r.sh);
   });
@@ -337,7 +356,7 @@ export function prnuFinalize(store: PrnuStore, progress: (fraction: number) => v
   const { w, h } = store;
   const k = [0, 1, 2].map((c) => {
     const out = new Float32Array(w * h);
-    for (let i = 0; i < out.length; i++) out[i] = store.s2[c][i] > 1e-4 ? store.s1[c][i] / store.s2[c][i] : 0;
+    for (let i = 0; i < out.length; i++) out[i] = store.s2[c][i] > 0.05 * S2_SCALE ? store.s1[c][i] / S1_SCALE / (store.s2[c][i] / S2_SCALE) : 0;
     zeroMean(out, w, h);
     const cleaned = wienerDft(out, w, h);
     progress((c + 1) / 3);
@@ -426,50 +445,31 @@ export function prnuCalibrate(planes: [Plane, Plane, Plane], map: PrnuMap, targe
 
 // --- storing ------------------------------------------------------------------------------
 
-/** The store packed for IndexedDB or a file: sums quantised to 16 bits per channel. */
+/** The store as it goes to IndexedDB or a file: the 16-bit arrays themselves, no copy. */
 export function packPrnuStore(store: PrnuStore): { header: Record<string, unknown>; buffers: ArrayBuffer[] } {
   const buffers: ArrayBuffer[] = [];
-  const scales: number[] = [];
-  const quant = (a: Float32Array, signed: boolean): void => {
-    let mx = 0;
-    for (const v of a) if (Math.abs(v) > mx) mx = Math.abs(v);
-    const scale = mx > 0 ? mx / (signed ? 32767 : 65535) : 1;
-    scales.push(scale);
-    const q = signed ? new Int16Array(a.length) : new Uint16Array(a.length);
-    for (let i = 0; i < a.length; i++) q[i] = Math.round(a[i] / scale);
-    buffers.push(q.buffer);
-  };
-  for (let c = 0; c < 3; c++) {
-    quant(store.s1[c], true);
-    quant(store.s2[c], false);
-  }
-  for (let hh = 0; hh < 2; hh++) {
-    quant(store.halves.s1[hh], true);
-    quant(store.halves.s2[hh], false);
-  }
-  return { header: { version: 1, key: store.key, w: store.w, h: store.h, photos: store.photos, scales }, buffers };
+  for (let c = 0; c < 3; c++) buffers.push(store.s1[c].buffer as ArrayBuffer, store.s2[c].buffer as ArrayBuffer);
+  for (let hh = 0; hh < 2; hh++) buffers.push(store.halves.s1[hh].buffer as ArrayBuffer, store.halves.s2[hh].buffer as ArrayBuffer);
+  return { header: { version: 2, key: store.key, w: store.w, h: store.h, photos: store.photos }, buffers };
 }
 
 export function unpackPrnuStore(header: Record<string, unknown>, buffers: ArrayBuffer[]): PrnuStore {
-  const store = newPrnuStore(String(header.key), Number(header.w), Number(header.h));
-  store.photos = Number(header.photos);
-  const scales = header.scales as number[];
-  let b = 0;
-  const deq = (dst: Float32Array, signed: boolean): void => {
-    const scale = scales[b];
-    const q = signed ? new Int16Array(buffers[b]) : new Uint16Array(buffers[b]);
-    for (let i = 0; i < dst.length; i++) dst[i] = q[i] * scale;
-    b++;
+  if (Number(header.version) !== 2) throw new Error('signature saved by an older version; teach it again');
+  const w = Number(header.w);
+  const h = Number(header.h);
+  const sw = Math.min(SPLIT_WINDOW, w) * Math.min(SPLIT_WINDOW, h);
+  const n = w * h;
+  const need = [n, n, n, n, n, n, sw, sw, sw, sw];
+  if (buffers.length !== 10 || buffers.some((b, i) => b.byteLength !== need[i] * 2)) throw new Error('signature data does not match its size');
+  return {
+    key: String(header.key),
+    w,
+    h,
+    s1: [new Int16Array(buffers[0]), new Int16Array(buffers[2]), new Int16Array(buffers[4])],
+    s2: [new Uint16Array(buffers[1]), new Uint16Array(buffers[3]), new Uint16Array(buffers[5])],
+    photos: Number(header.photos),
+    halves: { s1: [new Int16Array(buffers[6]), new Int16Array(buffers[8])], s2: [new Uint16Array(buffers[7]), new Uint16Array(buffers[9])] },
   };
-  for (let c = 0; c < 3; c++) {
-    deq(store.s1[c], true);
-    deq(store.s2[c], false);
-  }
-  for (let hh = 0; hh < 2; hh++) {
-    deq(store.halves.s1[hh], true);
-    deq(store.halves.s2[hh], false);
-  }
-  return store;
 }
 
 /** The key a photo's signature is filed under: camera make and model, and the frame size it was taken at. */

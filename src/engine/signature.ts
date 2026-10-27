@@ -21,6 +21,8 @@ export interface SignatureStatus {
   matchesPhoto: boolean;
   /** reliable enough to put back (4+ photos and reliability ≥ 0.3) */
   ready: boolean;
+  /** why the last save failed, if it did */
+  saveError: string | null;
   /** other signatures kept in this browser */
   others: { key: string; photos: number }[];
 }
@@ -52,12 +54,18 @@ function idbGet<T>(db: IDBDatabase, key: string): Promise<T | undefined> {
 }
 
 function idbPut(db: IDBDatabase, value: unknown): Promise<void> {
-  return new Promise((resolve) => {
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).put(value);
+  return new Promise((resolve, reject) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(STORE, 'readwrite');
+      tx.objectStore(STORE).put(value);
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error(String(e)));
+      return;
+    }
     tx.oncomplete = () => resolve();
-    tx.onerror = () => resolve();
-    tx.onabort = () => resolve();
+    tx.onerror = () => reject(new Error(tx.error?.message ?? 'storage error'));
+    tx.onabort = () => reject(new Error(tx.error?.message ?? 'storage refused the write (out of space?)'));
   });
 }
 
@@ -111,10 +119,20 @@ export class SignatureBank {
     const db = await this.database();
     const rec = db ? await idbGet<Record_>(db, key) : undefined;
     if (rec) {
-      this.store = unpackPrnuStore(rec.header, rec.buffers);
-      for (const s of (rec.header.seen as string[] | undefined) ?? []) this.seen.add(s);
+      try {
+        this.store = unpackPrnuStore(rec.header, rec.buffers);
+        const seen = (rec.header.seen as string[] | undefined) ?? [];
+        // the list of files learned from can never be longer than the count of photos learned
+        if (seen.length <= this.store.photos) for (const s of seen) this.seen.add(s);
+      } catch {
+        this.store = null;
+        if (db) await idbDelete(db, key);
+      }
     }
   }
+
+  /** What the last save did, for the panel: null when it went through, else why not. */
+  lastSaveError: string | null = null;
 
   /** Fold a photo in. Returns what happened in plain words. */
   async learn(key: string, planes: [Plane, Plane, Plane], luma: Plane, fileId: string): Promise<{ accepted: boolean; reason: string; usable: number }> {
@@ -132,11 +150,19 @@ export class SignatureBank {
   async save(): Promise<void> {
     if (!this.store || !this.dirty) return;
     const db = await this.database();
-    if (!db) return;
+    if (!db) {
+      this.lastSaveError = 'this browser offers no storage (private window?); the signature lives only until the page is closed';
+      return;
+    }
     const { header, buffers } = packPrnuStore(this.store);
     header.seen = [...this.seen];
-    await idbPut(db, { key: this.store.key, header, buffers } satisfies Record_);
-    this.dirty = false;
+    try {
+      await idbPut(db, { key: this.store.key, header, buffers } satisfies Record_);
+      this.dirty = false;
+      this.lastSaveError = null;
+    } catch (e) {
+      this.lastSaveError = `could not be saved (${e instanceof Error ? e.message : String(e)}); it lives only until the page is closed. Export it to a file to keep it`;
+    }
   }
 
   async forget(): Promise<void> {
@@ -174,6 +200,7 @@ export class SignatureBank {
       reliability: rel.reliability,
       matchesPhoto: !!s && s.key === this.photoKey,
       ready: !!s && s.photos >= 4 && rel.reliability >= 0.3,
+      saveError: this.lastSaveError,
       others: all.filter((r) => r.key !== s?.key).map((r) => ({ key: r.key, photos: Number(r.header.photos) })),
     };
   }
